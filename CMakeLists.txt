@@ -43,4 +43,4 @@ install(FILES packaging/com.scalerf.QuadRF.PhaseGaze.desktop DESTINATION ${CMAKE
 install(FILES packaging/quadrf-phasegaze.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 install(FILES packaging/com.scalerf.QuadRF.PhaseGaze.metainfo.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
 install(FILES packaging/quadrf-phasegaze.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
-install(PROGRAMS packaging/46-phasegaze DESTINATION usr/lib/quadrf/apply.d)
+install(PROGRAMS packaging/46-phasegaze DESTINATION lib/quadrf/apply.d)
