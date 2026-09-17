@@ -22,8 +22,11 @@ jobs:
 
       - name: Build Debian arm64 package
         run: |
+          mkdir -p dist
           docker run --rm --platform linux/arm64 \
-            -v "$PWD:/work" -w /work \
+            -v "$PWD:/work/source" \
+            -v "$PWD/dist:/work/dist" \
+            -w /work/source \
             debian:trixie-slim \
             bash -lc '
               set -ex
@@ -31,14 +34,8 @@ jobs:
               apt-get install --yes --no-install-recommends \
                 build-essential cmake debhelper libfftw3-dev pkgconf
               dpkg-buildpackage -b -uc -us
+              mv /work/quadrf-phasegaze_* /work/dist/
             '
-
-      - name: Prepare artifacts
-        run: |
-          mkdir -p dist
-          mv ../quadrf-phasegaze_*.deb dist/
-          mv ../quadrf-phasegaze_*.buildinfo dist/ 2>/dev/null || true
-          mv ../quadrf-phasegaze_*.changes dist/ 2>/dev/null || true
           cd dist
           sha256sum *.deb > SHA256SUMS
 
