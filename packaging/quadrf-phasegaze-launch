@@ -1,0 +1,22 @@
+#!/bin/sh
+# Same path as the control-panel Launch button: start the exclusive unit,
+# then open /phasegaze/ in the operator browser (Socket.IO) or locally.
+# 127.0.0.1:80 is the captive-portal vhost; Flask is on 8080 and the
+# named host (localhost / quadrf.local) serves the real locations.
+set -e
+sudo -n /usr/sbin/quadrf-app start phasegaze >/dev/null
+resp=$(curl -sS -X POST 'http://127.0.0.1:8080/api/apps/open?app=phasegaze' 2>/dev/null || true)
+case "$resp" in
+    *'"opened": true'*|*'"opened":true'*) exit 0 ;;
+esac
+url="http://localhost/phasegaze/"
+if command -v xdg-open >/dev/null; then
+    exec xdg-open "$url"
+fi
+if command -v chromium >/dev/null; then
+    exec chromium --app="$url"
+fi
+if command -v firefox >/dev/null; then
+    exec firefox "$url"
+fi
+exit 1

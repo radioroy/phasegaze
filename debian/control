@@ -1,0 +1,28 @@
+Source: quadrf-phasegaze
+Section: hamradio
+Priority: optional
+Maintainer: Roy C. Gross <61633595+radioroy@users.noreply.github.com>
+Build-Depends:
+ cmake,
+ debhelper-compat (= 13),
+ libfftw3-dev,
+ pkgconf | pkg-config
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/radioroy/phasegaze
+
+Package: quadrf-phasegaze
+Architecture: arm64
+Depends:
+ quadrf-common (>= 1.0.0),
+ ${misc:Depends},
+ ${shlibs:Depends}
+Recommends:
+ quadrf-fpga (>= 1.0.0)
+Description: swept-LO phase-gradient hemisphere viewer for QuadRF
+ PhaseGaze captures multi-lane CSI from the QuadRF front end, computes
+ spatial phase gradients across swept local oscillators, and serves a live 3D
+ hemisphere view over WebSockets.
+ .
+ Includes the systemd service, desktop launcher, web application, and
+ QuadRF control panel integration.

@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>PhaseGaze</title>
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<style>
+:root {
+    --bg: rgba(6, 8, 7, 0.88);
+    --pop: rgba(6, 8, 7, 0.42);
+    --line: #232823;
+    --line-hi: #3c463c;
+    --txt: #b8c4b8;
+    --dim: #5c665c;
+    --acc: #b8c4b8;
+    --acc-ink: #0c110c;
+    --acc-soft: rgba(184, 196, 184, 0.28);
+    --amber: #e6b45a;
+    --danger: #d05545;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden;
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+    color: var(--txt); font-size: 13px; user-select: none; -webkit-user-select: none; }
+
+#gl { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; touch-action: none; }
+
+/* ---------- HUD ---------- */
+#fps { position: absolute; left: 8px; bottom: 8px; z-index: 6; font-size: 10px;
+    letter-spacing: 0.1em; color: var(--dim); pointer-events: none; text-shadow: 0 1px 2px #000; }
+#status { position: absolute; right: 8px; bottom: 8px; z-index: 6; font-size: 10px;
+    letter-spacing: 0.1em; color: var(--dim); pointer-events: none; text-shadow: 0 1px 2px #000; }
+#status.warn { color: var(--amber); }
+#status.lost { color: var(--danger); }
+#hint { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%);
+    z-index: 6; font-size: 10px; letter-spacing: 0.14em; color: var(--dim);
+    opacity: 0; pointer-events: none; white-space: nowrap;
+    text-shadow: 0 1px 2px #000; transition: opacity 0.45s ease; }
+#hint.show { opacity: 0.55; transition: opacity 0.9s ease; }
+
+.hbtn { position: absolute; z-index: 7; background: var(--bg); border: 1px solid var(--line-hi);
+    color: var(--txt); padding: 9px 13px; font: inherit; font-size: 11px; letter-spacing: 0.15em;
+    cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.hbtn:active { border-color: var(--acc); }
+.hbtn.on { color: var(--acc-ink); background: var(--acc); border-color: var(--acc); }
+
+#hud-left, #hud-right { position: absolute; top: 8px; z-index: 8; display: flex; gap: 8px; }
+#hud-left { left: 8px; }
+#hud-right { right: 8px; }
+#hud-left .hbtn, #hud-right .hbtn { position: relative; }
+#btn-reset-view { bottom: 26px; right: 8px; padding: 4px 8px; font-size: 10px;
+    letter-spacing: 0.12em; z-index: 7; }
+
+/* gain slider (custom vertical) */
+#gain-wrap { position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    height: 44vh; width: 34px; z-index: 6; opacity: 0.9; touch-action: none; }
+#gain-track { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+    background: var(--line-hi); }
+#gain-thumb { position: absolute; left: 50%; width: 26px; height: 14px; margin-left: -13px;
+    background: #0c110c; border: 1px solid var(--acc); }
+#gain-label { position: absolute; right: 38px; top: 50%; transform: translateY(-50%);
+    font-size: 10px; color: var(--dim); letter-spacing: 0.1em; white-space: nowrap; }
+
+/* ---------- HUD popovers ---------- */
+.hud-pop { position: absolute; top: 48px; left: 8px; z-index: 6;
+    display: none; background: var(--pop); border: 1px solid var(--line-hi);
+    padding: 8px 10px; box-sizing: border-box;
+    max-height: calc(100vh - 64px); overflow-x: hidden; overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(8, 10, 8, 0.45) transparent; }
+.hud-pop::-webkit-scrollbar { width: 6px; }
+.hud-pop::-webkit-scrollbar-track { background: transparent; }
+.hud-pop::-webkit-scrollbar-thumb {
+    background: rgba(8, 10, 8, 0.45);
+    border: 1px solid rgba(184, 196, 184, 0.18); }
+.hud-pop::-webkit-scrollbar-thumb:hover { background: rgba(8, 10, 8, 0.62); }
+.hud-pop.open { display: block; }
+#set-pop .sect:first-child { margin-top: 4px; }
+
+.tabs { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.tab { text-align: center; padding: 5px 14px; border: 1px solid var(--line-hi);
+    letter-spacing: 0.15em; font-size: 11px; cursor: pointer; color: var(--dim);
+    background: none; font: inherit; }
+.tab.on { color: var(--acc-ink); background: var(--acc); border-color: var(--acc); }
+#tab-right { margin-left: auto; display: flex; gap: 6px; align-items: flex-start; }
+#tab-stack { position: relative; }
+#fft-side { display: none; position: absolute; right: 0; top: calc(100% + 3px);
+    z-index: 2; flex-direction: column; gap: 3px; align-items: stretch; }
+#fft-side.show { display: flex; }
+#fft-side .tab { padding: 2px 5px; font-size: 9px; letter-spacing: 0.08em; }
+
+#fft-block { display: none; margin: 0 0 6px; }
+#fft-block.show { display: block; }
+#fft-wrap { height: 48px; }
+#freq-range #fft-wrap { padding: 0 72px; }
+#freq-wifi #fft-wrap { padding: 0 72px 0 0; touch-action: none; cursor: pointer; }
+#freq-wifi #wifi-tiers { margin-right: 72px; }
+#fft-canvas { display: block; width: 100%; height: 48px; }
+
+/* wifi tier graphic — linear 5170–5895, no horizontal scroll */
+#wifi-tiers { position: relative; height: 96px; overflow: hidden; touch-action: none; }
+#wifi-gap { position: absolute; top: 2px; bottom: 2px; pointer-events: none;
+    background: rgba(255,255,255,0.035); }
+.tier-row { position: absolute; left: 0; right: 0; height: 32px; }
+.tile { position: absolute; top: 2px; bottom: 2px; border: 1px solid var(--line-hi);
+    background: rgba(30,36,30,0.55); color: var(--dim); font-size: 8px;
+    display: flex; align-items: flex-end; justify-content: center; cursor: pointer;
+    overflow: hidden; padding: 0 0 1px; letter-spacing: 0; line-height: 1;
+    touch-action: none; }
+.tile[data-bw="20"] { font-size: 7px; }
+.tile.on { border-color: var(--acc); color: var(--acc); background: var(--acc-soft); }
+
+.actions { display: flex; gap: 8px; margin-top: 14px; }
+.abtn { flex: 1; padding: 11px 4px; text-align: center; border: 1px solid var(--line-hi);
+    background: var(--bg); color: var(--txt); font: inherit; font-size: 11px;
+    letter-spacing: 0.15em; cursor: pointer; }
+.abtn.primary { border-color: var(--acc); color: var(--acc); }
+.abtn:active { background: var(--acc-soft); }
+
+/* manual dual-thumb range */
+#manual-wrap { padding: 2px 72px; }
+#range-hit { position: relative; height: 32px; cursor: pointer; }
+#range-bar { position: absolute; left: 0; right: 0; top: 50%; height: 2px;
+    margin-top: -1px; background: #1a1d1a; }
+#range-fill { position: absolute; top: 0; bottom: 0; background: var(--acc); opacity: 0.7; }
+.rthumb { position: absolute; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+    z-index: 1; background: #0c110c; border: 1px solid var(--acc); touch-action: none; cursor: pointer; }
+.rthumb .rlab { position: absolute; top: 50%; transform: translateY(-50%); font-size: 11px;
+    color: var(--acc); white-space: nowrap; letter-spacing: 0.08em; pointer-events: none; }
+#thumb-lo .rlab { right: 30px; }
+#thumb-hi .rlab { left: 30px; }
+.rmid { position: absolute; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+    z-index: 2; touch-action: none; cursor: grab; }
+.rmid-dia { position: absolute; left: 50%; top: 50%; width: 10px; height: 10px;
+    margin: -5px 0 0 -5px; background: var(--acc); transform: rotate(45deg); }
+.rmid .rlab { position: absolute; left: 50%; top: 26px; transform: translateX(-50%);
+    font-size: 9px; color: var(--acc); letter-spacing: 0.08em; white-space: nowrap;
+    pointer-events: none; }
+
+/* color scheme tiles */
+.scheme { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line-hi);
+    padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+.scheme.on { border-color: var(--acc); }
+.scheme .sw { flex: 0 0 110px; height: 16px; border: 1px solid var(--line); }
+.scheme .nm { font-size: 11px; letter-spacing: 0.15em; }
+.scheme .md { margin-left: auto; font-size: 9px; color: var(--dim); letter-spacing: 0.1em; }
+.scheme .sopts { margin-left: auto; display: flex; gap: 4px; }
+.pbtn { background: var(--bg); border: 1px solid var(--line-hi); color: var(--dim);
+    font: inherit; font-size: 9px; letter-spacing: 0.12em; padding: 3px 7px; cursor: pointer; }
+.pbtn.on { color: var(--acc-ink); background: var(--acc); border-color: var(--acc); }
+.scheme[data-name=target].on .sw { border-color: var(--acc); box-shadow: 0 0 0 1px var(--acc);
+    height: 20px; cursor: pointer; }
+#lut-pick { display: none; border: 1px solid var(--acc); padding: 6px; margin: -2px 0 8px; }
+#lut-pick.open { display: block; }
+.lut { display: flex; align-items: center; gap: 10px; padding: 6px 8px; margin-bottom: 4px;
+    border: 1px solid var(--line-hi); cursor: pointer; }
+.lut:last-child { margin-bottom: 0; }
+.lut.on { border-color: var(--acc); }
+.lut .sw { flex: 0 0 110px; height: 14px; border: 1px solid var(--line); }
+.lut .nm { font-size: 11px; letter-spacing: 0.15em; }
+#target-opts { border: 1px solid var(--line); padding: 12px; margin-top: 4px; display: none; }
+
+/* settings rows */
+.srow { margin: 14px 0; }
+.srow label { display: flex; justify-content: space-between; font-size: 11px;
+    letter-spacing: 0.12em; color: var(--txt); margin-bottom: 6px; }
+.srow label span { color: var(--acc); }
+.srow input[type=range] { width: 100%; -webkit-appearance: none; appearance: none; height: 22px;
+    background: transparent; }
+.srow input[type=range]::-webkit-slider-runnable-track { height: 2px; background: var(--line-hi); }
+.srow input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px;
+    margin-top: -9px; background: #0c110c; border: 1px solid var(--acc); border-radius: 0; }
+.tgl { display: flex; justify-content: space-between; align-items: center; padding: 11px 0;
+    border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: 0.12em; cursor: pointer; }
+.tgl .sw2 { width: 34px; height: 16px; border: 1px solid var(--line-hi); position: relative; }
+.tgl .sw2::after { content: ''; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px;
+    background: var(--dim); transition: left 0.12s, background 0.12s; }
+.tgl.on .sw2::after { left: 20px; background: var(--acc); }
+.sect { margin: 20px 0 4px; font-size: 10px; letter-spacing: 0.25em; color: var(--dim);
+    border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.pick { display: flex; align-items: center; gap: 10px; }
+#s-accent { width: 52px; height: 28px; padding: 0; border: 1px solid var(--line-hi);
+    background: var(--bg); cursor: pointer; }
+#s-accent::-webkit-color-swatch-wrapper { padding: 3px; }
+#s-accent::-webkit-color-swatch { border: none; }
+#s-accent::-moz-color-swatch { border: none; }
+
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/controls/OrbitControls.js": "./vendor/OrbitControls.js"
+} }
+</script>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+
+<div id="status" class="warn">CONNECTING</div>
+<div id="fps"></div>
+<div id="hint">DRAG TO MOVE&ensp;&ensp;SCROLL TO ZOOM</div>
+
+<div id="hud-left">
+    <button class="hbtn" id="btn-freq">FREQ</button>
+    <button class="hbtn" id="btn-color">COLOR</button>
+</div>
+<div id="hud-right">
+    <button class="hbtn" id="btn-mirror">MIRROR</button>
+    <button class="hbtn" id="btn-view">INSIDE</button>
+    <button class="hbtn" id="btn-set">CONFIG</button>
+</div>
+<button class="hbtn" id="btn-reset-view">CENTER</button>
+
+<div id="gain-wrap">
+    <div id="gain-track"></div>
+    <div id="gain-thumb"></div>
+    <div id="gain-label">RF GAIN</div>
+</div>
+
+<!-- ============ FREQ popover ============ -->
+<div class="hud-pop" id="freq-pop">
+    <div class="tabs">
+        <div class="tab on" id="ftab-range">RANGE</div>
+        <div class="tab" id="ftab-wifi">WIFI</div>
+        <div id="tab-right">
+            <button class="tab" id="btn-fft">FFT</button>
+            <div id="tab-stack">
+                <button class="tab" id="freq-reset">RESET</button>
+                <div id="fft-side">
+                    <button class="tab" id="btn-fft-speed">FAST</button>
+                    <button class="tab" id="btn-fft-agc">AGC</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="freq-range">
+        <div id="fft-block">
+            <div id="fft-wrap">
+                <canvas id="fft-canvas"></canvas>
+            </div>
+        </div>
+        <div id="manual-wrap">
+            <div id="range-hit">
+                <div id="range-bar">
+                    <div id="range-fill"></div>
+                    <div class="rthumb" id="thumb-lo"><div class="rlab"></div></div>
+                    <div class="rmid" id="thumb-mid"><div class="rmid-dia"></div><div class="rlab"></div></div>
+                    <div class="rthumb" id="thumb-hi"><div class="rlab"></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="freq-wifi" style="display:none">
+        <div id="wifi-tiers"></div>
+    </div>
+</div>
+
+<!-- ============ COLOR popover ============ -->
+<div class="hud-pop" id="color-pop">
+    <div id="scheme-list"></div>
+    <div id="lut-pick"></div>
+    <div id="target-opts">
+        <div class="srow">
+            <label>TARGET FREQ <span id="target-freq-val"></span></label>
+            <input type="range" id="target-freq" min="4900" max="6100" step="1">
+        </div>
+        <div class="srow">
+            <label>WINDOW <span id="target-width-val"></span></label>
+            <input type="range" id="target-width" min="9" max="1200" step="1">
+        </div>
+    </div>
+</div>
+
+<!-- ============ CONFIG popover ============ -->
+<div class="hud-pop" id="set-pop">
+    <div class="sect">RENDER</div>
+    <div class="srow"><label>POINT SIZE <span id="v-size"></span></label>
+        <input type="range" id="s-size" min="4" max="60" step="1"></div>
+    <div class="srow"><label>INTENSITY CURVE <span id="v-gain"></span></label>
+        <input type="range" id="s-gain" min="0.5" max="8" step="0.1"></div>
+    <div class="srow"><label>DECAY <span id="v-decay"></span></label>
+        <input type="range" id="s-decay" min="0" max="100" step="1"></div>
+    <div class="srow"><label>DENSITY <span id="v-dens"></span></label>
+        <input type="range" id="s-dens" min="1" max="100" step="1"></div>
+    <div class="tgl" id="t-pulse"><span>AGE RIPPLE</span><div class="sw2"></div></div>
+
+    <div class="sect">GEOMETRY</div>
+    <div class="tgl" id="t-flip"><span>FLIP L/R</span><div class="sw2"></div></div>
+
+    <div class="sect">SPHERE</div>
+    <div class="tgl" id="t-bottom"><span>BACK HEMISPHERE</span><div class="sw2"></div></div>
+    <div class="tgl" id="t-tiles"><span>TILES</span><div class="sw2"></div></div>
+    <div class="tgl" id="t-rings"><span>DETERMINISTIC LINES</span><div class="sw2"></div></div>
+
+    <div class="sect">UI</div>
+    <div class="srow">
+        <label>ACCENT <span id="v-accent"></span></label>
+        <input type="color" id="s-accent" value="#b8c4b8">
+    </div>
+
+    <div class="sect">SYSTEM</div>
+    <div class="actions">
+        <button class="abtn" id="s-fullscreen">FULLSCREEN</button>
+        <button class="abtn" id="s-clear">CLEAR POINTS</button>
+        <button class="abtn" id="s-defaults">DEFAULTS</button>
+    </div>
+</div>
+
+<script type="module" src="./app.js?v=pg56"></script>
+</body>
+</html>

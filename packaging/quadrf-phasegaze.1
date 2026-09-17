@@ -1,0 +1,38 @@
+.TH QUADRF-PHASEGAZE 1 "September 2026" "QuadRF" "QuadRF"
+.SH NAME
+quadrf-phasegaze \- swept-LO phase-gradient hemisphere
+.SH SYNOPSIS
+.B quadrf-phasegaze
+[\fIoptions\fR]
+.SH DESCRIPTION
+Sweeps the QuadRF local oscillator over four-lane CSI (38 Msps, FFT 8192,
+20 MHz LO step), runs phase-gradient DOA on the four receive channels, and
+serves a packed point stream plus a static hemisphere page.
+.PP
+The control panel Launch button and the desktop icon both start
+.B quadrf-phasegaze.service
+and open
+.IR /phasegaze/ ,
+which nginx proxies to port 8001. Closing the last tab stops the service,
+same as Spatial RF Vision. Frequency and gain can also be set from that page.
+.SH OPTIONS
+.TP
+.BI --port " N"
+Listen address
+.BR http://0.0.0.0:N .
+Default: 8001.
+.TP
+.BI --web " DIR"
+Directory of static files (index.html and the Three.js client). Default:
+.IR /usr/share/quadrf/phasegaze .
+.TP
+.B --help
+Print usage and exit.
+.SH FILES
+.TP
+.I /usr/share/quadrf/phasegaze
+Installed browser client.
+.SH SEE ALSO
+.BR quadrf-rf-vision (1),
+.BR quadrf-jtag (1),
+.BR quadrf-app (8)

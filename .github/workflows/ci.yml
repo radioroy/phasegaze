@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    name: Build Debian arm64 package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build Debian arm64 package
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/work" -w /work \
+            debian:trixie-slim \
+            bash -lc '
+              set -ex
+              apt-get update
+              apt-get install --yes --no-install-recommends \
+                build-essential cmake debhelper libfftw3-dev pkgconf
+              dpkg-buildpackage -b -uc -us
+            '
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist
+          mv ../quadrf-phasegaze_*.deb dist/
+          mv ../quadrf-phasegaze_*.buildinfo dist/ 2>/dev/null || true
+          mv ../quadrf-phasegaze_*.changes dist/ 2>/dev/null || true
+          cd dist
+          sha256sum *.deb > SHA256SUMS
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quadrf-phasegaze-arm64
+          path: dist/*

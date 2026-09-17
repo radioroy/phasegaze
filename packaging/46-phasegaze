@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+if [ -f /usr/share/quadrf/functions.sh ]; then
+    . /usr/share/quadrf/functions.sh
+    quadrf_user_dropin quadrf-phasegaze.service
+fi

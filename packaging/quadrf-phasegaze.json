@@ -1,0 +1,14 @@
+{
+  "apps": [
+    {
+      "id": "phasegaze",
+      "name": "PhaseGaze",
+      "desktop_entry": "com.scalerf.QuadRF.PhaseGaze.desktop",
+      "service": "quadrf-phasegaze.service",
+      "binaries": ["quadrf-phasegaze"],
+      "exclusive": true,
+      "open": "/phasegaze/",
+      "ready_port": 8001
+    }
+  ]
+}

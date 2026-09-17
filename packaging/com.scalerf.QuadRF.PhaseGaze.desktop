@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=PhaseGaze
+Comment=Swept-LO phase-gradient hemisphere over four-lane CSI
+Exec=/usr/bin/quadrf-phasegaze-launch
+TryExec=/usr/bin/quadrf-phasegaze
+Icon=quadrf-phasegaze
+Terminal=false
+Categories=HamRadio;Science;
+X-QuadRF-Desktop=true

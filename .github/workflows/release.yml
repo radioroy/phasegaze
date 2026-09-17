@@ -1,0 +1,54 @@
+name: Release packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build Debian arm64 package
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/work" -w /work \
+            debian:trixie-slim \
+            bash -lc '
+              set -ex
+              apt-get update
+              apt-get install --yes --no-install-recommends \
+                build-essential cmake debhelper libfftw3-dev pkgconf
+              dpkg-buildpackage -b -uc -us
+            '
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p dist
+          mv ../quadrf-phasegaze_*.deb dist/
+          mv ../quadrf-phasegaze_*.buildinfo dist/ 2>/dev/null || true
+          mv ../quadrf-phasegaze_*.changes dist/ 2>/dev/null || true
+          cd dist
+          sha256sum *.deb > SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME:-v0.1.0}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" --generate-notes dist/*
+          fi

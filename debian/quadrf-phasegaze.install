@@ -1,0 +1,9 @@
+usr/bin/quadrf-phasegaze
+usr/bin/quadrf-phasegaze-launch
+usr/share/quadrf/phasegaze
+usr/share/quadrf/apps.d/quadrf-phasegaze.json
+usr/share/applications/com.scalerf.QuadRF.PhaseGaze.desktop
+usr/share/icons/hicolor/scalable/apps/quadrf-phasegaze.svg
+usr/share/metainfo/com.scalerf.QuadRF.PhaseGaze.metainfo.xml
+usr/share/man/man1/quadrf-phasegaze.1
+usr/lib/quadrf/apply.d/46-phasegaze
