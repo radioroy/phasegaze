@@ -108,6 +108,8 @@ int server_start(const server_cfg_t *cfg)
 {
     memset(&S, 0, sizeof(S));
     S.cfg = *cfg;
+    /* mongoose defaults to MG_LL_DEBUG, which logs every WS write to journald. */
+    mg_log_set(MG_LL_ERROR);
     pthread_mutex_init(&S.mtx, NULL);
     for (int i = 0; i < SLOTS; ++i) {
         S.slots[i].buf = malloc(SLOT_CAP);
