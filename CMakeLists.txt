@@ -12,6 +12,7 @@ find_package(Threads REQUIRED)
 add_executable(quadrf-phasegaze
     src/main.c
     src/csi_dev.c
+    src/tuner.c
     src/dsp.c
     src/server.c
     src/external/mongoose.c

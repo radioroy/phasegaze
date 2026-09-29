@@ -26,8 +26,9 @@ int  server_start(const server_cfg_t *cfg);
 void server_stop(void);
 
 /* Queue a binary frame for broadcast (copies data). slot 0: point frames,
- * slot 1: spectrum frames. A newer frame in the same slot replaces an unsent
- * older one - stale RF data has no value. */
+ * slot 1: spectrum frames. An unsent point frame keeps its hits and appends
+ * the next sweep of the same plan; the packet goes out on the next poll
+ * that finds a client keeping up. Spectrum stays latest-wins. */
 void server_publish(int slot, const void *data, size_t len);
 
 /* Ask the server thread to push state JSON to everyone. */

@@ -35,7 +35,7 @@ attribute vec2 aGrad;
 attribute vec4 aAux;    // freq_mhz, intensity, birth_sec, _
 attribute vec4 aQuat;   // device->world at ingest
 
-uniform float uNow, uDecayTau, uGain, uPointSize, uPixelRatio, uPulse;
+uniform float uNow, uDecayTau, uStampWindow, uGain, uPointSize, uPixelRatio, uPulse;
 uniform float uMorph, uFlipX, uFlipW, uSfK, uExtrap;
 uniform vec2  uMirror;
 uniform vec4  uQuatView;      // conj(current device->world)
@@ -48,6 +48,10 @@ uniform float uFreqLo, uFreqHi, uTargetFreq, uTargetWidth;
 
 varying vec4 vColor;
 varying float vPulse;
+
+/* Facing and the AR behind-camera term only reduce alpha, so a point
+ * already under this is invisible on every path. */
+#define ALPHA_MIN 0.004
 
 vec3 qrot(vec4 q, vec3 v) {
     return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
@@ -65,20 +69,29 @@ void kill() { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); gl_PointSize = 0.0; vColor
 void main() {
     float freq = aAux.x;
     float inten = aAux.y;
-    float sf = uSfK * freq;
 
+    // decay + intensity curve (uGain is a power-law exponent; high exponent
+    // suppresses the noise floor, matching the proven AR tool response)
+    float age = max(uNow - aAux.z, 0.0);
+    float decay;
+    if (uDecayTau < 0.0) {
+        /* Slider left end. One paint, then gone. A tiny tau would
+         * cross ALPHA_MIN in the gap before that paint. */
+        if (age >= uStampWindow) { kill(); return; }
+        decay = 1.0;
+    } else {
+        decay = (uDecayTau > 0.0) ? exp(-age / uDecayTau) : 1.0;
+    }
+    float lvl = pow(clamp(inten, 0.0, 1.0), uGain);
+    float alpha = lvl * 0.55 * decay;
+    if (alpha < ALPHA_MIN) { kill(); return; }
+
+    float sf = uSfK * freq;
     vec2 g = aGrad + uMirror;
     vec2 uv = g / sf;
     float r2 = dot(uv, uv);
     if (r2 > 1.0) { kill(); return; }
     float w = sqrt(1.0 - r2) * uFlipW;
-
-    // decay + intensity curve (uGain is a power-law exponent; high exponent
-    // suppresses the noise floor, matching the proven AR tool response)
-    float age = max(uNow - aAux.z, 0.0);
-    float decay = (uDecayTau > 0.0) ? exp(-age / uDecayTau) : 1.0;
-    float lvl = pow(clamp(inten, 0.0, 1.0), uGain);
-    float alpha = lvl * 0.55 * decay;
 
     // device frame: X right, Y up, boresight along +Z
     vec3 dirDev = vec3(uv.x, uv.y, w);
@@ -130,7 +143,7 @@ void main() {
         szMod  = mix(0.80, 1.0, tf);
     }
 
-    if (alpha < 0.004) { kill(); return; }
+    if (alpha < ALPHA_MIN) { kill(); return; }
 
     vPulse = uPulse * (1.0 - decay);
     float sz = uPointSize * uPixelRatio * (0.35 + 0.65 * lvl) * szMod;
@@ -303,7 +316,8 @@ const IDENT_Q = [0, 0, 0, 1];
 
 export class VrfRenderer {
     constructor(canvas) {
-        this.renderer = new THREE.WebGLRenderer({ canvas, alpha: false, antialias: false });
+        // alpha so camera mode can composite the point cloud over the video
+        this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.renderer.setClearColor(0x000000, 1);
@@ -322,6 +336,7 @@ export class VrfRenderer {
 
         // ---- state ----
         this.morph = 1; this.morphTarget = 1;
+        this.camMode = false;
         this.sphereCam = 'orbit';          // 'orbit' | 'inside'
         this.imuQuat = new THREE.Quaternion();
         this.imuEnabled = false;
@@ -357,6 +372,8 @@ export class VrfRenderer {
         this.pointGeo = geo;
         this.head = 0;
         this.used = 0;
+        this._fresh = 0;
+        this._stampT = 0;
 
         const lutTex = new THREE.DataTexture(new Uint8Array(256 * 4).fill(255), 256, 1);
         lutTex.needsUpdate = true;
@@ -368,7 +385,8 @@ export class VrfRenderer {
         this._chanTex.needsUpdate = true;
 
         this.pointUniforms = {
-            uNow: { value: 0 }, uDecayTau: { value: 0.8 }, uGain: { value: 4.0 },
+            uNow: { value: 0 }, uDecayTau: { value: 0.8 }, uStampWindow: { value: 0.05 },
+            uGain: { value: 4.0 },
             uPointSize: { value: 10 }, uPixelRatio: { value: this.renderer.getPixelRatio() },
             uPulse: { value: 0 },
             uMorph: { value: 0 }, uFlipX: { value: 1 }, uFlipW: { value: 1 },
@@ -508,6 +526,7 @@ export class VrfRenderer {
             if (this.head === 0) wrapped = true;
             if (this.used < CAPACITY) this.used++;
         }
+        this._fresh = Math.min(CAPACITY, this._fresh + n);
 
         // Upload just the touched span (full upload on wrap, which is rare).
         for (const attr of [this.aGrad, this.aAux, this.aQuat]) {
@@ -523,7 +542,7 @@ export class VrfRenderer {
     clearPoints() {
         for (let i = 0; i < CAPACITY; i++) this.aAux.setZ(i, -1e9);
         this.aAux.needsUpdate = true;
-        this.head = 0; this.used = 0;
+        this.head = 0; this.used = 0; this._fresh = 0;
         this.pointGeo.setDrawRange(0, 0);
     }
 
@@ -566,6 +585,7 @@ export class VrfRenderer {
         this.pointUniforms.uTargetFreq.value = freq;
         this.pointUniforms.uTargetWidth.value = width;
     }
+    /* tau > 0 fade, tau == 0 hold, tau < 0 show only this frame's hits. */
     setDecayTau(tau) { this.pointUniforms.uDecayTau.value = tau; }
     setPointSize(s) { this.pointUniforms.uPointSize.value = s; }
     setPointGain(g) { this.pointUniforms.uGain.value = g; }
@@ -596,6 +616,13 @@ export class VrfRenderer {
         if (!on) this.imuQuat.identity();
     }
     setMorphTarget(t) { this.morphTarget = t; }
+    /* Camera mode = morph 0 (screen-space quad warp) over a transparent
+     * clear so the video element behind the canvas shows through. */
+    setCamMode(on) {
+        this.camMode = on;
+        this.morphTarget = on ? 0 : 1;
+        this.renderer.setClearColor(0x000000, on ? 0 : 1);
+    }
     // Burn leftover orbit damping/zoom without a visible jump. update()
     // applies sphericalDelta then zeros it; we restore the pose we want
     // and sync internals from that.
@@ -753,8 +780,30 @@ export class VrfRenderer {
         this.shellBack.material.side = hemiSide;
         this.pointMat.depthTest = false;
 
-        this.pointUniforms.uNow.value = this.now();
+        const tNow = this.now();
+        const gap = this._stampT > 0 ? (tNow - this._stampT) : Math.max(tNow, 1e-4);
+        this._stampT = tNow;
+        this.pointUniforms.uNow.value = tNow;
+        this.pointUniforms.uStampWindow.value = Math.max(gap, 1e-4);
+        this._stampDrawRange();
         this.renderer.render(this.scene, this.camera);
+        this._fresh = 0;
+    }
+
+    /* Stamp mode only draws hits that arrived since the previous paint.
+     * A batch that wrapped the ring falls back to the whole buffer; the
+     * shader still drops anything older than this frame. */
+    _stampDrawRange() {
+        if (!(this.pointUniforms.uDecayTau.value < 0)) {
+            this.pointGeo.setDrawRange(0, this.used);
+            return;
+        }
+        const n = Math.min(this._fresh, this.used);
+        if (n > 0 && this.head >= n) {
+            this.pointGeo.setDrawRange(this.head - n, n);
+            return;
+        }
+        this.pointGeo.setDrawRange(0, n > 0 ? this.used : 0);
     }
 
     _resize() {

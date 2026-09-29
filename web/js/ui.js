@@ -2,6 +2,8 @@
 
 import { WIFI_TIERS, WIFI_F0, WIFI_F1, WIFI_SCAN_BANDS, WIFI_HOP_BANDS, WIFI_GAP } from './wifi.js';
 import { SCHEMES, schemeCss, lutRgb } from './colors.js';
+import { Cam } from './cam.js';
+import { applyDrag, defaultCorners, sanitizeCorners, unmapPoint } from './cal.js';
 
 const TARGET_LUTS = ['spectrum', 'iron', 'whitehot', 'greenhot', 'viridis'];
 
@@ -31,11 +33,13 @@ const FFT_EQ_TAU = 0.40;
 /* One 20 MHz hop has one sample per IF offset — p20 is the spectrum
  * itself. Need ≥2 hops to classify the analog shape. */
 const FFT_EQ_MIN_HOPS = 2;
-const LS_KEY = 'phasegaze.settings.v6';
+const LS_KEY = 'phasegaze.settings.v8';
 const ACCENT_DEFAULT = '#b8c4b8';
+/* Camera mode hides the HUD this long after the last tap. */
+const CAM_HIDE_MS = 8000;
 
 const DEFAULTS = {
-    size: 15, gain: 4.0, decay: 23, density: 100,
+    size: 15, gain: 4.0, decay: 1, density: 100,
     pulse: false, flip: false,
     mirrors: true, bottom: false, tiles: true, rings: true,
     scheme: 'spectrum', targetLut: 'iron', targetFreq: 5500, targetWidth: 40,
@@ -45,6 +49,7 @@ const DEFAULTS = {
     manualLo: HW_MIN, manualHi: HW_MAX,
     wifiSel: [],
     accent: ACCENT_DEFAULT,
+    corners: defaultCorners(),
 };
 
 function parseHex(v) {
@@ -67,13 +72,16 @@ function accentInk(hex) {
     return lum > 0.55 ? '#0c110c' : '#e8ece8';
 }
 
-/* decay slider (0..100) -> time constant in seconds; 100 = hold forever */
+/* 0 = one frame, 100 = hold, else time constant in seconds (0.05 .. 20). */
 function decayTau(v) {
+    if (v <= 0) return -1;
     if (v >= 100) return 0;
-    return 0.05 * Math.pow(400, v / 100);   // 0.05 s .. 20 s
+    return 0.05 * Math.pow(400, (v - 1) / 98);
 }
 function decayLabel(v) {
-    return v >= 100 ? 'HOLD' : `${decayTau(v).toFixed(2)} S`;
+    if (v <= 0) return 'STAMP';
+    if (v >= 100) return 'HOLD';
+    return `${decayTau(v).toFixed(2)} S`;
 }
 
 const $ = (id) => document.getElementById(id);
@@ -97,6 +105,7 @@ export class Ui {
             this.s.wifiColor = this.s.wifiChan === true ? 'chan' : 'band';
         delete this.s.wifiChan;
         this.s.wifiSel = sanitizeWifiSel(this.s.wifiSel);
+        this.s.corners = sanitizeCorners(this.s.corners);
 
         this.spectrum = null;
         this._fftAvg = null;
@@ -118,6 +127,12 @@ export class Ui {
         this._rangeSendTimer = 0;
         this._freqTab = 'range';
 
+        this.camMode = false;
+        this.calOn = false;
+        this._camHideTimer = null;
+        this._revealTap = false;
+        this.cam = new Cam($('cam-feed'));
+
         this._selectFreqTab = null;
         this._buildWifi();
         this._buildSchemes();
@@ -128,15 +143,34 @@ export class Ui {
         this._bindSettings();
         this._bindPointer();
         this._bindHint();
+        this._bindCal();
+        this._bindCamFade();
         this._applyAll();
+        this._syncModeUi();
         this._resize();
         window.addEventListener('resize', () => this._resize());
+        if (window.visualViewport)
+            window.visualViewport.addEventListener('resize', () => this._resize());
     }
 
     _load() {
         try {
             const cur = localStorage.getItem(LS_KEY);
             if (cur) return JSON.parse(cur) || {};
+            const v7 = localStorage.getItem('phasegaze.settings.v7');
+            if (v7) {
+                const prev = JSON.parse(v7) || {};
+                /* v7 slider 0 was the 0.05 s default. 0 is now one frame. */
+                if (prev.decay === 0) prev.decay = 1;
+                return prev;
+            }
+            const v6 = localStorage.getItem('phasegaze.settings.v6');
+            if (v6) {
+                const prev = JSON.parse(v6) || {};
+                /* 23 was the v6 default (~0.20 s). 0 was 0.05 s. */
+                if (prev.decay === 23 || prev.decay === 0) prev.decay = 1;
+                return prev;
+            }
             const v3 = localStorage.getItem('phasegaze.settings.v3');
             if (v3) {
                 const prev = JSON.parse(v3) || {};
@@ -175,6 +209,7 @@ export class Ui {
         r.setBottom(s.bottom);
         r.setTiles(s.tiles);
         r.setRings(s.rings);
+        r.setCorners(s.corners);
         this._applySchemeLut();
         this._syncFreqColor();
         r.setTarget(s.targetFreq, s.targetWidth);
@@ -235,6 +270,189 @@ export class Ui {
             $('btn-view').textContent = (next === 'orbit' ? 'inside' : 'orbit').toUpperCase();
         };
         $('btn-reset-view').onclick = () => this.renderer.resetView();
+
+        $('btn-cam').onclick = () => this._setCamMode(!this.camMode);
+        $('btn-cal').onclick = () => this._setCal(!this.calOn);
+        $('btn-reset-cal').onclick = () => {
+            this.s.corners = defaultCorners();
+            this.renderer.setCorners(this.s.corners);
+            this._drawCal(null);
+            this.save();
+        };
+        $('btn-flip').onclick = () => this._setFlip(!this.s.flip);
+        $('btn-full').onclick = () => {
+            if (!document.fullscreenElement)
+                document.documentElement.requestFullscreen().catch(() => {});
+            else document.exitFullscreen().catch(() => {});
+        };
+        document.addEventListener('fullscreenchange', () => {
+            $('btn-full').classList.toggle('on', !!document.fullscreenElement);
+        });
+    }
+
+    // ==================================================================
+    // Camera (AR) mode
+    // ==================================================================
+
+    _setCamMode(on) {
+        if (this.camMode === on) return;
+        this.camMode = on;
+        document.body.classList.toggle('cam', on);
+        this._closeFreq();
+        this._closeColor();
+        this._closeSet();
+        this.renderer.setCamMode(on);
+        if (on) {
+            this.cam.start();
+        } else {
+            this.cam.stop();
+            this._setCal(false);
+        }
+        this._setHint(false);
+        this._syncModeUi();
+        this._bumpControls();
+    }
+
+    _setCal(on) {
+        this.calOn = on && this.camMode;
+        document.body.classList.toggle('cal', this.calOn);
+        $('btn-cal').classList.toggle('on', this.calOn);
+        this._drawCal(null);
+        this._bumpControls();
+    }
+
+    _setFlip(on) {
+        this.s.flip = on;
+        this.renderer.setFlipX(on);
+        $('t-flip').classList.toggle('on', on);
+        $('btn-flip').classList.toggle('on', on);
+        this.save();
+    }
+
+    /* Button/section visibility for the active mode. */
+    _syncModeUi() {
+        const cam = this.camMode;
+        const show = (id, vis) => { $(id).style.display = vis ? '' : 'none'; };
+        $('btn-cam').classList.toggle('on', cam);
+        show('btn-cal', cam);
+        show('btn-mirror', !cam);
+        show('btn-view', !cam);
+        show('btn-reset-view', !cam);
+        show('btn-reset-cal', cam);
+        show('btn-flip', cam);
+        // Geometry flip lives on the bottom-right button in camera mode, and
+        // the sphere shell toggles have nothing to act on.
+        for (const id of ['sect-geometry', 't-flip', 'sect-sphere',
+                          't-bottom', 't-tiles', 't-rings'])
+            show(id, !cam);
+        $('btn-flip').classList.toggle('on', !!this.s.flip);
+    }
+
+    _bindCamFade() {
+        // Capture phase: a tap that only brings the HUD back must not also
+        // land on a control or start a calibration drag.
+        document.addEventListener('pointerdown', () => {
+            this._revealTap = this.camMode && document.body.classList.contains('dim');
+            this._bumpControls();
+        }, { capture: true, passive: true });
+        const clear = () => { this._revealTap = false; };
+        document.addEventListener('pointerup', clear, { capture: true, passive: true });
+        document.addEventListener('pointercancel', clear, { capture: true, passive: true });
+    }
+
+    _bumpControls() {
+        clearTimeout(this._camHideTimer);
+        this._camHideTimer = null;
+        document.body.classList.remove('dim');
+        if (!this.camMode) return;
+        this._camHideTimer = setTimeout(() => {
+            if (this._calDrag || $('freq-pop').classList.contains('open') ||
+                    $('color-pop').classList.contains('open') ||
+                    $('set-pop').classList.contains('open')) {
+                this._bumpControls();
+                return;
+            }
+            document.body.classList.add('dim');
+        }, CAM_HIDE_MS);
+    }
+
+    // ---------- alignment drag ----------
+
+    _bindCal() {
+        const cv = $('cal-layer');
+        this._calDrag = null;
+        const at = (e) => ({ x: e.clientX, y: e.clientY });
+
+        cv.addEventListener('pointerdown', (e) => {
+            if (this._revealTap) return;
+            const p = at(e);
+            // The drag start is the observation: invert the current warp to
+            // learn which RF direction is being shown at this pixel.
+            const src = unmapPoint(this.s.corners, p.x / innerWidth, p.y / innerHeight);
+            if (!src) return;
+            this._calDrag = {
+                u: src.u, v: src.v, x0: p.x, y0: p.y, x: p.x, y: p.y,
+                base: this.s.corners.map(c => ({ u: c.u, v: c.v })),
+                moved: false,
+            };
+            try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+            e.preventDefault();
+        });
+
+        cv.addEventListener('pointermove', (e) => {
+            const d = this._calDrag;
+            if (!d) return;
+            const p = at(e);
+            if (!d.moved && Math.hypot(p.x - d.x0, p.y - d.y0) < 8) return;
+            d.moved = true;
+            d.x = p.x; d.y = p.y;
+            applyDrag(this.s.corners, d.base, d.u, d.v,
+                      (p.x - d.x0) / innerWidth, (p.y - d.y0) / innerHeight);
+            this.renderer.setCorners(this.s.corners);
+            this._drawCal(d);
+            this._bumpControls();
+            e.preventDefault();
+        });
+
+        const end = (e) => {
+            const d = this._calDrag;
+            if (!d) return;
+            if (d.moved) {
+                const p = at(e);
+                applyDrag(this.s.corners, d.base, d.u, d.v,
+                          (p.x - d.x0) / innerWidth, (p.y - d.y0) / innerHeight);
+                this.renderer.setCorners(this.s.corners);
+                this.save();
+            }
+            this._calDrag = null;
+            this._drawCal(null);
+            this._bumpControls();
+        };
+        cv.addEventListener('pointerup', end);
+        cv.addEventListener('pointercancel', end);
+    }
+
+    /* Correction vector feedback. The RF itself is the alignment reference,
+     * so nothing else is drawn on this layer. */
+    _drawCal(d) {
+        const cv = $('cal-layer');
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
+        if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+        const ctx = cv.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, innerWidth, innerHeight);
+        $('cal-tip').classList.toggle('hide', !!(d && d.moved));
+        if (!d || !d.moved) return;
+        const acc = this.s.accent || ACCENT_DEFAULT;
+        ctx.strokeStyle = acc;
+        ctx.fillStyle = acc;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(d.x0, d.y0);
+        ctx.lineTo(d.x, d.y);
+        ctx.stroke();
+        ctx.fillRect(d.x0 - 4, d.y0 - 4, 8, 8);
     }
 
     _openFreq() {
@@ -333,6 +551,7 @@ export class Ui {
     }
 
     _setHint(vis) {
+        if (vis && this.camMode) return;   // orbit/zoom hint means nothing in AR
         if (vis && ($('freq-pop').classList.contains('open') ||
                     $('color-pop').classList.contains('open') ||
                     $('set-pop').classList.contains('open')))
@@ -1246,7 +1465,7 @@ export class Ui {
             };
         };
         bindToggle('pulse', 'pulse', v => this.renderer.setPulse(v));
-        bindToggle('flip', 'flip', v => this.renderer.setFlipX(v));
+        $('t-flip').onclick = () => this._setFlip(!this.s.flip);
         bindToggle('bottom', 'bottom', v => this.renderer.setBottom(v));
         bindToggle('tiles', 'tiles', v => this.renderer.setTiles(v));
         bindToggle('rings', 'rings', v => this.renderer.setRings(v));
@@ -1261,17 +1480,12 @@ export class Ui {
         };
         accent.onchange = () => this.save();
 
-        $('s-fullscreen').onclick = () => {
-            if (!document.fullscreenElement)
-                document.documentElement.requestFullscreen().catch(() => {});
-            else document.exitFullscreen();
-        };
         $('s-clear').onclick = () => this.renderer.clearPoints();
         $('s-defaults').onclick = () => this._restoreDefaults();
     }
 
     _restoreDefaults() {
-        this.s = { ...DEFAULTS, wifiSel: [] };
+        this.s = { ...DEFAULTS, wifiSel: [], corners: defaultCorners() };
         this.save();
         this._applyAll();
         this._syncSchemeUi();
@@ -1279,6 +1493,7 @@ export class Ui {
         if (this._layoutManual) this._layoutManual();
         this._layoutGain();
         this._placeFft();
+        this._syncModeUi();
         this.pushBackend();
     }
 
@@ -1294,6 +1509,7 @@ export class Ui {
         for (const [id, key] of Object.entries(tmap))
             $(`t-${id}`).classList.toggle('on', !!this.s[key]);
         $('btn-mirror').classList.toggle('on', !!this.s.mirrors);
+        $('btn-flip').classList.toggle('on', !!this.s.flip);
     }
 
     // ==================================================================
@@ -1327,9 +1543,14 @@ export class Ui {
     _layoutHudPops() {
         const right = $('hud-right').getBoundingClientRect().left;
         const w = Math.max(280, right - 8 - 8) + 'px';
-        $('freq-pop').style.width = w;
-        $('color-pop').style.width = w;
-        $('set-pop').style.width = w;
+        /* Mobile browser toolbars eat into 100vh, which used to clip the
+         * bottom action row even when scrolled to the end. */
+        const vv = window.visualViewport;
+        const h = Math.max(160, (vv ? vv.height : innerHeight) - 64) + 'px';
+        for (const id of ['freq-pop', 'color-pop', 'set-pop']) {
+            $(id).style.width = w;
+            $(id).style.maxHeight = h;
+        }
         if (this._layoutManual) this._layoutManual();
         if (this.s.fft) requestAnimationFrame(() => this._drawFft());
     }
@@ -1337,6 +1558,7 @@ export class Ui {
     _resize() {
         this._layoutHudPops();
         this._drawFft();
+        this._drawCal(this._calDrag);
     }
 
     // ==================================================================

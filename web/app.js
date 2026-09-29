@@ -1,8 +1,9 @@
-// app.js — hemisphere viewer + live CSI stream. No camera, no IMU.
+// app.js — hemisphere viewer + live CSI stream. Optional rear-camera AR
+// overlay (CAM); no IMU, so AR points are stamped in the device frame.
 
-import { Net } from './js/net.js?v=pg55';
-import { VrfRenderer } from './js/render.js?v=pg55';
-import { Ui } from './js/ui.js?v=pg55';
+import { Net } from './js/net.js?v=pg59';
+import { VrfRenderer } from './js/render.js?v=pg59';
+import { Ui } from './js/ui.js?v=pg59';
 
 const renderer = new VrfRenderer(document.getElementById('gl'));
 const net = new Net();

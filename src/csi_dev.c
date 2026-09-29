@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
@@ -291,20 +292,46 @@ void csi_dev_read_block(csi_dev_t *d, uint8_t *dst, uint32_t block_bytes,
     }
 }
 
+int csi_dev_ring_pos(csi_dev_t *d, uint32_t *head, uint32_t *tail)
+{
+    struct csi_ring_info ri;
+    if (ioctl(d->fd, CSI_IOC_GET_RING_INFO, &ri) != 0)
+        return -1;
+    if (head) *head = ri.head;
+    if (tail) *tail = ri.tail;
+    return 0;
+}
+
+int csi_dev_consume(csi_dev_t *d, uint32_t n)
+{
+    return consume(d->fd, n);
+}
+
+int csi_dev_wait(csi_dev_t *d, int timeout_ms)
+{
+    struct pollfd p = { .fd = d->fd, .events = POLLIN };
+    return poll(&p, 1, timeout_ms);
+}
+
 void csi_dev_flush(csi_dev_t *d, uint32_t align_bytes)
 {
     struct csi_ring_info ri;
     if (ioctl(d->fd, CSI_IOC_GET_RING_INFO, &ri) != 0)
         return;
+    (void)align_bytes;
     uint64_t rsz = ri.ring_size ? (uint64_t)ri.ring_size : d->ring_size;
+    /* Take everything. The driver keeps rpos across opens, so a previous
+     * reader that consumed 64 KiB blocks can leave the tail mid-span;
+     * trimming to whole spans would keep that phase and every "span"
+     * read afterwards would straddle two DMA spans. The head only moves
+     * in whole spans, so emptying the ring puts the tail on its grid. */
     uint32_t used = ring_used(ri.head, ri.tail, rsz);
-    if (align_bytes > 0)
-        used -= used % align_bytes;
     if (used)
         (void)consume(d->fd, used);
 }
 
-int csi_dev_read_settled_block(csi_dev_t *d, uint8_t *dst, uint32_t block_bytes)
+int csi_dev_read_settled_block(csi_dev_t *d, uint8_t *dst, uint32_t block_bytes,
+                                double tune_mhz)
 {
     uint32_t span = d->span_bytes ? d->span_bytes : (block_bytes * 2);
     uint64_t rsz = d->ring_size;
@@ -336,6 +363,12 @@ int csi_dev_read_settled_block(csi_dev_t *d, uint8_t *dst, uint32_t block_bytes)
         }
 
         if (used >= span) {
+            /* The next span has just started. Program its LO before the copy
+             * so the PLL gets that interval plus the first half of the span
+             * (~215 us at 38 Msps) before the following read labels it. */
+            if (tune_mhz > 0.0)
+                csi_dev_set_lo(d, tune_mhz);
+
             uint32_t blk_start = (uint32_t)(((uint64_t)ri.tail + offset_in_span) % rsz);
             uint32_t n1 = block_bytes;
             if ((uint64_t)blk_start + n1 > rsz)
@@ -364,27 +397,305 @@ static uint16_t lna_band_reg2(double mhz)
     return 0x1E0;
 }
 
+/* Automatic VAS on Main17 does not finish inside the ~215 us second half of
+ * a DMA span, so that block was still the previous 20 MHz channel. Manual
+ * VAS_SPI[5:0] (Main19 bit6 = 0) is only the fractional-N relock. Seeds are
+ * the same file quadrf-rf-vision writes. */
+#define MAX2851_SPI         0x43u
+#define MAIN19_VAS_RELOCK   (1u << 7)
+#define MAIN19_VAS_MODE     (1u << 6)
+#define VAS_DEFAULT_SEED    31u
+#define VCO_CACHE_SIZE      512u
+#define VCO_SEED_MAX        256
+#define VCO_SEED_PATH       "/var/lib/quadrf/demos/max2851_vco_seeds.txt"
+
+typedef struct {
+    uint64_t key;
+    uint8_t  band;
+    uint8_t  valid;
+} vco_entry_t;
+
+static vco_entry_t g_vco[VCO_CACHE_SIZE];
+static struct { double mhz; uint8_t band; } g_seed[VCO_SEED_MAX];
+static unsigned g_nseed;
+static int g_seed_loaded;
+static int g_seed_dirty;
+
+static uint32_t vco_hash(uint64_t key)
+{
+    uint32_t x = (uint32_t)key ^ (uint32_t)(key >> 32);
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    return x & (VCO_CACHE_SIZE - 1u);
+}
+
+static int vco_lookup(uint64_t key, uint8_t *band)
+{
+    uint32_t i = vco_hash(key);
+    for (uint32_t n = 0; n < VCO_CACHE_SIZE; n++) {
+        vco_entry_t *e = &g_vco[(i + n) & (VCO_CACHE_SIZE - 1u)];
+        if (!e->valid)
+            return 0;
+        if (e->key == key) {
+            *band = e->band;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void vco_store(uint64_t key, uint8_t band)
+{
+    uint32_t i = vco_hash(key);
+    for (uint32_t n = 0; n < VCO_CACHE_SIZE; n++) {
+        vco_entry_t *e = &g_vco[(i + n) & (VCO_CACHE_SIZE - 1u)];
+        if (!e->valid || e->key == key) {
+            e->key = key;
+            e->band = (uint8_t)(band & 0x3Fu);
+            e->valid = 1;
+            return;
+        }
+    }
+    g_vco[i].key = key;
+    g_vco[i].band = (uint8_t)(band & 0x3Fu);
+    g_vco[i].valid = 1;
+}
+
+static void synth_words(double mhz, uint16_t *w15, uint16_t *w16, uint16_t *w17,
+                        uint64_t *key)
+{
+    double ratio = mhz / 80.0;
+    long long idiv = (long long)floor(ratio);
+    long long fdiv = llround((ratio - (double)idiv) * (double)(1u << 20));
+    if (fdiv == (1LL << 20)) {
+        idiv++;
+        fdiv = 0;
+    }
+    uint32_t f20 = (uint32_t)fdiv & 0xFFFFFu;
+    uint32_t n7 = (uint32_t)idiv & 0x7Fu;
+    *w15 = (uint16_t)((15u << 10) | (1u << 9) | n7); /* VAS_TRIG_EN */
+    *w16 = (uint16_t)((16u << 10) | ((f20 >> 10) & 0x3FFu));
+    *w17 = (uint16_t)((17u << 10) | (f20 & 0x3FFu));
+    if (key)
+        *key = ((uint64_t)n7 << 20) | f20;
+}
+
+static void seed_load(void)
+{
+    if (g_seed_loaded)
+        return;
+    g_seed_loaded = 1;
+    FILE *f = fopen(VCO_SEED_PATH, "r");
+    if (!f)
+        return;
+    double mhz;
+    unsigned band;
+    while (g_nseed < VCO_SEED_MAX && fscanf(f, "%lf %u", &mhz, &band) == 2) {
+        if (band > 63u)
+            continue;
+        g_seed[g_nseed].mhz = mhz;
+        g_seed[g_nseed].band = (uint8_t)band;
+        g_nseed++;
+        uint16_t w15, w16, w17;
+        uint64_t key;
+        synth_words(mhz, &w15, &w16, &w17, &key);
+        vco_store(key, (uint8_t)band);
+    }
+    fclose(f);
+}
+
+static int seed_lookup(double mhz, uint8_t *band)
+{
+    for (unsigned i = 0; i < g_nseed; i++) {
+        if (fabs(g_seed[i].mhz - mhz) < 0.01) {
+            *band = g_seed[i].band;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void seed_remember(double mhz, uint8_t band)
+{
+    for (unsigned i = 0; i < g_nseed; i++) {
+        if (fabs(g_seed[i].mhz - mhz) < 0.01) {
+            if (g_seed[i].band != band) {
+                g_seed[i].band = band;
+                g_seed_dirty = 1;
+            }
+            return;
+        }
+    }
+    if (g_nseed >= VCO_SEED_MAX)
+        return;
+    g_seed[g_nseed].mhz = mhz;
+    g_seed[g_nseed].band = band;
+    g_nseed++;
+    g_seed_dirty = 1;
+}
+
+static void seed_save(void)
+{
+    if (!g_seed_dirty)
+        return;
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", VCO_SEED_PATH);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    for (unsigned i = 0; i < g_nseed; i++)
+        fprintf(f, "%.3f %u\n", g_seed[i].mhz, (unsigned)g_seed[i].band);
+    if (fclose(f) != 0) {
+        unlink(tmp);
+        return;
+    }
+    if (rename(tmp, VCO_SEED_PATH) != 0) {
+        unlink(tmp);
+        return;
+    }
+    g_seed_dirty = 0;
+}
+
+/* Main27 D5 opens VCO readback. D[8:6] is the VTUNE zone, D[5:0] the band.
+ * Zones 0 and 7 are outside the lock range. */
+static int read_vco(csi_dev_t *d, uint8_t *band, uint8_t *adc)
+{
+    if (jtag_write(d, MAX2851_SPI, (uint16_t)((27u << 10) | 0x1A0u)) != 0)
+        return -1;
+    if (jtag_write(d, MAX2851_SPI, (uint16_t)((14u << 10) | 0x162u)) != 0)
+        return -1;
+    if (jtag_write(d, MAX2851_SPI, (uint16_t)(0x8000u | (19u << 10))) != 0)
+        return -1;
+    uint16_t v = 0;
+    int rc = jtag_read(d, MAX2851_SPI, &v);
+    jtag_write(d, MAX2851_SPI, (uint16_t)((14u << 10) | 0x160u));
+    jtag_write(d, MAX2851_SPI, (uint16_t)((27u << 10) | 0x180u));
+    if (rc != 0)
+        return -1;
+    *band = (uint8_t)(v & 0x3Fu);
+    *adc = (uint8_t)((v >> 6) & 0x7u);
+    return 0;
+}
+
+static int program_auto(csi_dev_t *d, double mhz, int from_current, uint8_t seed)
+{
+    uint16_t w15, w16, w17;
+    synth_words(mhz, &w15, &w16, &w17, NULL);
+    uint16_t main19 = from_current
+        ? (uint16_t)(MAIN19_VAS_RELOCK | MAIN19_VAS_MODE | VAS_DEFAULT_SEED)
+        : (uint16_t)(MAIN19_VAS_MODE | (seed & 0x3Fu));
+    uint16_t w2 = (uint16_t)((2u << 10) | (lna_band_reg2(mhz) & 0x3FFu));
+    struct csi_jtag_reg regs[5] = {
+        { .addr = MAX2851_SPI, .value = (uint16_t)((19u << 10) | main19) },
+        { .addr = MAX2851_SPI, .value = w15 },
+        { .addr = MAX2851_SPI, .value = w16 },
+        { .addr = MAX2851_SPI, .value = w17 },
+        { .addr = MAX2851_SPI, .value = w2 },
+    };
+    return jtag_batch(d, regs, 5);
+}
+
+/* Automatic VAS, then hold the band it found. Not used on the hop loop. */
+static int vco_learn(csi_dev_t *d, double mhz, int from_current, uint8_t seed)
+{
+    uint16_t w15, w16, w17;
+    uint64_t key;
+    synth_words(mhz, &w15, &w16, &w17, &key);
+    uint8_t have;
+    if (vco_lookup(key, &have))
+        return 0;
+
+    if (program_auto(d, mhz, from_current, seed) != 0)
+        return -1;
+
+    uint8_t band = 0, adc = 0xFF;
+    for (int i = 0; i < 6; i++) {
+        usleep(i == 0 ? 1500 : 1000);
+        if (read_vco(d, &band, &adc) != 0)
+            return -1;
+        if (adc >= 1 && adc <= 6)
+            break;
+    }
+    if (adc < 1 || adc > 6)
+        return -1;
+
+    if (jtag_write(d, MAX2851_SPI, (uint16_t)((19u << 10) | (band & 0x3Fu))) != 0)
+        return -1;
+    vco_store(key, band);
+    seed_remember(mhz, band);
+    d->last_lo_mhz = mhz;
+    d->last_lna_word = (uint16_t)((2u << 10) | (lna_band_reg2(mhz) & 0x3FFu));
+    d->have_lna_word = 1;
+    return 1;
+}
+
+static int vco_learn_one(csi_dev_t *d, double mhz, int prefer_current)
+{
+    uint8_t seed = 0;
+    int have_seed = seed_lookup(mhz, &seed);
+    if (prefer_current && vco_learn(d, mhz, 1, 0) >= 0)
+        return 0;
+    if (have_seed && vco_learn(d, mhz, 0, seed) >= 0)
+        return 0;
+    if ((!have_seed || seed != VAS_DEFAULT_SEED) &&
+        vco_learn(d, mhz, 0, VAS_DEFAULT_SEED) >= 0)
+        return 0;
+    return -1;
+}
+
+static int program_manual(csi_dev_t *d, uint8_t band,
+                          uint16_t w15, uint16_t w16, uint16_t w17, uint16_t w2,
+                          int send_lna)
+{
+    struct csi_jtag_reg regs[5];
+    uint32_t n = 0;
+    regs[n].addr = MAX2851_SPI;
+    regs[n++].value = (uint16_t)((19u << 10) | (band & 0x3Fu));
+    regs[n].addr = MAX2851_SPI; regs[n++].value = w15;
+    regs[n].addr = MAX2851_SPI; regs[n++].value = w16;
+    regs[n].addr = MAX2851_SPI; regs[n++].value = w17;
+    if (send_lna) {
+        regs[n].addr = MAX2851_SPI;
+        regs[n++].value = w2;
+    }
+    return jtag_batch(d, regs, n);
+}
+
+int csi_dev_lo_switches_band(const csi_dev_t *d, double freq_mhz)
+{
+    uint16_t w2 = (uint16_t)((2u << 10) | (lna_band_reg2(freq_mhz) & 0x3FFu));
+    return !d->have_lna_word || d->last_lna_word != w2;
+}
+
 int csi_dev_set_lo(csi_dev_t *d, double freq_mhz)
 {
     if (d->last_lo_mhz > 1.0 && fabs(freq_mhz - d->last_lo_mhz) < 1e-6)
         return 0;
-    double ratio = freq_mhz / 80.0;
-    int idiv = (int)floor(ratio);
-    int fdiv = (int)llround((ratio - idiv) * (double)(1u << 20));
-    uint16_t w2 = (uint16_t)((2u << 10) | (lna_band_reg2(freq_mhz) & 0x3FF));
+
+    seed_load();
+    uint16_t w15, w16, w17;
+    uint64_t key;
+    synth_words(freq_mhz, &w15, &w16, &w17, &key);
+    uint16_t w2 = (uint16_t)((2u << 10) | (lna_band_reg2(freq_mhz) & 0x3FFu));
     int send_lna = !d->have_lna_word || d->last_lna_word != w2;
 
-    struct csi_jtag_reg regs[4] = {
-        { .addr = 0x43, .value = (uint16_t)((15u << 10) | (1u << 9) | (idiv & 0x7f)) },
-        { .addr = 0x43, .value = (uint16_t)((16u << 10) | ((fdiv >> 10) & 0x3ff)) },
-        { .addr = 0x43, .value = (uint16_t)((17u << 10) | (fdiv & 0x3ff)) },
-        { .addr = 0x43, .value = w2 },
-    };
-    uint32_t n = send_lna ? 4u : 3u;
-    if (jtag_batch(d, regs, n) != 0)
+    uint8_t band = 0;
+    if (!vco_lookup(key, &band)) {
+        if (vco_learn_one(d, freq_mhz, 1) != 0) {
+            fprintf(stderr, "phasegaze: VCO learn failed at %.1f MHz\n", freq_mhz);
+            if (program_auto(d, freq_mhz, 1, 0) != 0)
+                return -1;
+            d->last_lo_mhz = freq_mhz;
+        }
+        if (d->last_gain >= 0)
+            csi_dev_set_gain(d, d->last_gain);
+        return 0;
+    }
+
+    if (program_manual(d, band, w15, w16, w17, w2, send_lna) != 0)
         return -1;
     d->last_lo_mhz = freq_mhz;
-
     if (send_lna) {
         d->last_lna_word = w2;
         d->have_lna_word = 1;
@@ -393,6 +704,81 @@ int csi_dev_set_lo(csi_dev_t *d, double freq_mhz)
             csi_dev_set_gain(d, d->last_gain);
     }
     return 0;
+}
+
+static int cmp_double(const void *a, const void *b)
+{
+    double d = *(const double *)a - *(const double *)b;
+    return (d > 0.0) - (d < 0.0);
+}
+
+static int prime_at(csi_dev_t *d, double mhz)
+{
+    uint16_t w15, w16, w17;
+    uint64_t key;
+    uint8_t band;
+    synth_words(mhz, &w15, &w16, &w17, &key);
+    if (vco_lookup(key, &band))
+        return csi_dev_set_lo(d, mhz);
+    return vco_learn_one(d, mhz, 1);
+}
+
+int csi_dev_prime_los(csi_dev_t *d, const double *mhz, int n)
+{
+    if (n <= 0)
+        return 0;
+    if (n > 128)
+        n = 128;
+    seed_load();
+
+    double *f = malloc((size_t)n * sizeof(double));
+    if (!f)
+        return -1;
+    memcpy(f, mhz, (size_t)n * sizeof(double));
+    qsort(f, (size_t)n, sizeof(double), cmp_double);
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        if (m > 0 && fabs(f[i] - f[m - 1]) < 0.05)
+            continue;
+        f[m++] = f[i];
+    }
+
+    int need = 0;
+    for (int i = 0; i < m; i++) {
+        uint16_t w15, w16, w17;
+        uint64_t key;
+        uint8_t band;
+        synth_words(f[i], &w15, &w16, &w17, &key);
+        if (!vco_lookup(key, &band))
+            need++;
+    }
+    if (need == 0) {
+        free(f);
+        return 0;
+    }
+
+    uint64_t t0 = now_ns();
+    int start = m / 2;
+    int failed = 0;
+    /* Cached steps are a manual retune so the next miss starts VAS next to
+     * the band it just left. */
+    for (int i = start; i >= 0; i--) {
+        if (prime_at(d, f[i]) != 0)
+            failed++;
+    }
+    if (csi_dev_set_lo(d, f[start]) != 0)
+        failed++;
+    for (int i = start + 1; i < m; i++) {
+        if (prime_at(d, f[i]) != 0)
+            failed++;
+    }
+    if (d->last_gain >= 0)
+        csi_dev_set_gain(d, d->last_gain);
+    seed_save();
+    fprintf(stderr, "phasegaze: VCO primed %d new / %d hops, %d failed, %.0f ms\n",
+            need, m, failed, (double)(now_ns() - t0) / 1e6);
+    free(f);
+    return failed;
 }
 
 int csi_dev_set_gain(csi_dev_t *d, int gain)

@@ -35,13 +35,29 @@ void csi_dev_close(csi_dev_t *d);
 void csi_dev_read_block(csi_dev_t *d, uint8_t *dst, uint32_t block_bytes,
                         uint32_t bytes_per_frame, int max_queued_blocks);
 
-/* Read settled steady-state block (Block 1) from the current 128 KiB DMA span
- * and consume the entire span, keeping the ring empty and aligned for the
- * next pipelined LO retune. */
-int  csi_dev_read_settled_block(csi_dev_t *d, uint8_t *dst, uint32_t block_bytes);
+/* Read the settled tail of one 128 KiB DMA span and consume the span.
+ * If tune_mhz > 0, program that LO after the span is observed and before
+ * the copy, so PLL lock overlaps the copy instead of the next dwell. */
+int  csi_dev_read_settled_block(csi_dev_t *d, uint8_t *dst, uint32_t block_bytes,
+                                double tune_mhz);
 
-/* Discard complete spans currently in the ring. */
+/* Learn VCO sub-bands this plan does not already have. Cache and seed-file
+ * hits do not run a search. Call when the hop list changes, not per hop. */
+int  csi_dev_prime_los(csi_dev_t *d, const double *mhz, int n);
+
+/* Discard everything queued; the tail lands on the producer's span grid.
+ * align_bytes is ignored (kept for callers). */
 void csi_dev_flush(csi_dev_t *d, uint32_t align_bytes);
+
+/* Raw ring offsets (head = producer). Either pointer may be NULL. */
+int  csi_dev_ring_pos(csi_dev_t *d, uint32_t *head, uint32_t *tail);
+int  csi_dev_consume(csi_dev_t *d, uint32_t n);
+/* Block until the ring is non-empty (driver wakes on every span publish). */
+int  csi_dev_wait(csi_dev_t *d, int timeout_ms);
+
+/* 1 if set_lo(freq_mhz) will also rewrite Main2 (LNA band) and restrobe
+ * gain. That write is longer and its transition reaches the ADC earlier. */
+int  csi_dev_lo_switches_band(const csi_dev_t *d, double freq_mhz);
 
 /* Program the synthesizer to freq_mhz (batched, ~atomic). */
 int  csi_dev_set_lo(csi_dev_t *d, double freq_mhz);

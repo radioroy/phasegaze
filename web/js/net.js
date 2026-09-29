@@ -64,6 +64,7 @@ export class Net {
             loEnd: dv.getFloat32(16, true),
             fps: dv.getFloat32(20, true),
             seq: dv.getUint32(24, true),
+            sweeps: dv.getUint32(28, true),
         };
         if (header.type === 0 && this.onPoints) {
             const need = HDR_BYTES + header.count * 16;
