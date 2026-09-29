@@ -67,6 +67,75 @@ void dsp_cs8_extract_rotate(const int8_t *src, int ch,
 }
 
 // ---------------------------------------------------------------------------
+// CS8 split, all four channels in one pass
+// ---------------------------------------------------------------------------
+//
+// Same vld4q_s16 deinterleave as above, but every loaded lane is used, so
+// the 64 KiB block is read once instead of four times. The byte stats ride
+// along on the same registers.
+//
+// Numerics: with scale[c] = 1/127 this is bit-identical to
+// dsp_cs8_extract_rotate(..., 1.0f, 0.0f). There, v * (1 * inv127) +
+// rev64(v) * (+-0) is one FMA whose addend is a signed zero, which returns
+// v * inv127 exactly.
+
+void dsp_cs8_split4(const int8_t *src, float *const dst[4], int n,
+                    const float scale[4], int *peak_out, int32_t *sumsq_out)
+{
+    int i = 0;
+    int peak = 0;
+    int32_t sumsq = 0;
+
+#if defined(__aarch64__)
+    const int16_t *s16 = (const int16_t *)src;
+    float32x4_t vsc[4];
+    for (int c = 0; c < 4; ++c) vsc[c] = vdupq_n_f32(scale[c]);
+    int8x16_t vmax = vdupq_n_s8(0), vmin = vdupq_n_s8(0);
+    /* s8*s8 fits s16 (max 16384); pairwise-accumulated into s32. 65536
+     * bytes * 16384 < 2^31, so no lane can overflow. */
+    int32x4_t acc = vdupq_n_s32(0);
+
+    for (; i + 8 <= n; i += 8) {
+        int16x8x4_t q = vld4q_s16(s16 + (size_t)i * 4);
+        for (int c = 0; c < 4; ++c) {
+            int8x16_t iq8 = vreinterpretq_s8_s16(q.val[c]);
+            vmax = vmaxq_s8(vmax, iq8);
+            vmin = vminq_s8(vmin, iq8);
+            acc = vpadalq_s16(acc, vmull_s8(vget_low_s8(iq8), vget_low_s8(iq8)));
+            acc = vpadalq_s16(acc, vmull_high_s8(iq8, iq8));
+
+            int16x8_t lo = vmovl_s8(vget_low_s8(iq8));
+            int16x8_t hi = vmovl_s8(vget_high_s8(iq8));
+            float *d = dst[c] + (size_t)i * 2;
+            vst1q_f32(d,      vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo))),  vsc[c]));
+            vst1q_f32(d + 4,  vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), vsc[c]));
+            vst1q_f32(d + 8,  vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi))),  vsc[c]));
+            vst1q_f32(d + 12, vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), vsc[c]));
+        }
+    }
+    /* -128 has no s8 magnitude, so take the extremes as ints. */
+    int hi = vmaxvq_s8(vmax), lo = -(int)vminvq_s8(vmin);
+    peak = hi > lo ? hi : lo;
+    sumsq = vaddvq_s32(acc);
+#endif
+
+    for (; i < n; ++i) {
+        for (int c = 0; c < 4; ++c) {
+            int re = src[(size_t)i * 8 + (size_t)c * 2];
+            int im = src[(size_t)i * 8 + (size_t)c * 2 + 1];
+            int ar = re < 0 ? -re : re, ai = im < 0 ? -im : im;
+            if (ar > peak) peak = ar;
+            if (ai > peak) peak = ai;
+            sumsq += re * re + im * im;
+            dst[c][(size_t)i * 2 + 0] = (float)re * scale[c];
+            dst[c][(size_t)i * 2 + 1] = (float)im * scale[c];
+        }
+    }
+    *peak_out = peak;
+    *sumsq_out = sumsq;
+}
+
+// ---------------------------------------------------------------------------
 // 4-channel log power spectrum
 // ---------------------------------------------------------------------------
 
@@ -146,6 +215,32 @@ void dsp_power4_log_shifted(float *const ch_out[4], float *out, int n, int dc_gu
         if (k >= 0 && k < n) out[k] = 0.0f;
 }
 
+void dsp_power4_log_shifted_range(float *const ch_out[4], float *out, int n,
+                                  int dc_guard, int k0, int k1)
+{
+    const int half = n / 2;
+    /* Widen to whole 4-bin groups on the same grid as the full-span call,
+     * so no bin falls into the scalar logf() tail and every value matches
+     * dsp_power4_log_shifted() bit for bit. */
+    if (k0 < 0) k0 = 0;
+    k0 &= ~3;
+    k1 |= 3;
+    if (k1 > n - 1) k1 = n - 1;
+    if (k0 > k1) return;
+
+    if (k0 < half) {
+        int e = k1 < half ? k1 : half - 1;
+        power4_log_range(ch_out, half + k0, out + k0, e - k0 + 1);
+    }
+    if (k1 >= half) {
+        int s = k0 > half ? k0 : half;
+        power4_log_range(ch_out, s - half, out + s, k1 - s + 1);
+    }
+
+    for (int k = half - dc_guard; k <= half + dc_guard; ++k)
+        if (k >= k0 && k <= k1) out[k] = 0.0f;
+}
+
 // ---------------------------------------------------------------------------
 // CA-CFAR + top-K heap
 // ---------------------------------------------------------------------------
@@ -220,31 +315,106 @@ int dsp_cfar_topk(const float *v, int k0, int k1, int win, int guard, float thre
 // Phase-gradient DOA solve
 // ---------------------------------------------------------------------------
 
-float dsp_solve_gradient(float phi10, float phi20, float phi30,
-                         float *gx_out, float *gy_out)
+/*
+ * With the model p1 = -sqrt3/2 gx + gy/2, p2 = gy, p3 = sqrt3/2 gx + gy/2
+ * and the least-squares (gx, gy) below, the residual is always
+ *   r = (y1 - y2 + y3) / 3 * (1, -1, 1),   |r|^2 = (y1 - y2 + y3)^2 / 3.
+ * It depends on the 2*pi lattice cell only through m = n10 - n20 + n30:
+ *   lb(m) = (phi10 - phi20 + phi30 + 2*pi*m)^2 / 3.
+ * The regularizer is >= 0, so lb(m) is a lower bound on every cell of
+ * class m. A cell whose bound is above a cost already achieved cannot win,
+ * and if even the smallest bound is above max_cost the hit is rejected by
+ * the full search too.
+ *
+ * LB_SLACK absorbs float rounding between lb() and the per-cell sum
+ * (|y| < 7*pi, so both are within ~1e-4 of exact). Only cells that lose
+ * by more than that are skipped; the rest run the original per-cell
+ * arithmetic in the original order, so the winner and its cost match the
+ * exhaustive 125-cell search.
+ */
+#define LB_SLACK(c) (1e-2f + 1e-3f * (c))
+
+/* Cost of one cell, only used as an upper bound, so its rounding does not
+ * need to match the search loop. */
+static inline float cell_cost(float phi10, float phi20, float phi30,
+                              int n10, int n20, int n30)
 {
     const float inv_sqrt3 = 0.5773502691896258f;
     const float reg = 1e-3f;
     const float TWO_PI = 6.283185307179586f;
 
+    float y1 = phi10 + TWO_PI * (float)n10;
+    float y2 = phi20 + TWO_PI * (float)n20;
+    float y3 = phi30 + TWO_PI * (float)n30;
+
+    float gx = (y3 - y1) * inv_sqrt3;
+    float gy = (y1 + 2.0f * y2 + y3) * (1.0f / 3.0f);
+
+    float p1 = -0.8660254037844386f * gx + 0.5f * gy;
+    float p2 = gy;
+    float p3 =  0.8660254037844386f * gx + 0.5f * gy;
+
+    float r1 = y1 - p1, r2 = y2 - p2, r3 = y3 - p3;
+    return r1 * r1 + r2 * r2 + r3 * r3 + reg * (gx * gx + gy * gy);
+}
+
+float dsp_solve_gradient(float phi10, float phi20, float phi30, float max_cost,
+                         float *gx_out, float *gy_out)
+{
+    const float TWO_PI = 6.283185307179586f;
+    const float s0 = phi10 - phi20 + phi30;
+
+    float lb[13];
+    for (int m = -6; m <= 6; ++m) {
+        float s = s0 + TWO_PI * (float)m;
+        lb[m + 6] = s * s * (1.0f / 3.0f);
+    }
+    int m_best = -6;
+    for (int m = -5; m <= 6; ++m)
+        if (lb[m + 6] < lb[m_best + 6]) m_best = m;
+    float lb_min = lb[m_best + 6];
+    if (lb_min > max_cost + LB_SLACK(max_cost)) {
+        *gx_out = 0.0f;
+        *gy_out = 0.0f;
+        return lb_min;
+    }
+
+    /* Any cell's cost bounds the winner's. Take one from the best class,
+     * with n20 = 0 and n10 + n30 = m_best (|m_best| <= 3 for wrapped
+     * phases, so this stays on the -2..2 lattice). */
+    int n10 = m_best / 2, n30 = m_best - n10;
+    if (n30 > 2) { n30 = 2; n10 = m_best - 2; }
+    if (n30 < -2) { n30 = -2; n10 = m_best + 2; }
+    float bound = 1e30f;
+    if (n10 >= -2 && n10 <= 2)
+        bound = cell_cost(phi10, phi20, phi30, n10, 0, n30);
+    bound += LB_SLACK(bound);
+
+    const float inv_sqrt3 = 0.5773502691896258f;
+    const float reg = 1e-3f;
+    const float c30 = 0.8660254037844386f;
     float best_cost = 1e30f, best_gx = 0.0f, best_gy = 0.0f;
 
     for (int n10 = -2; n10 <= 2; ++n10)
     for (int n20 = -2; n20 <= 2; ++n20)
     for (int n30 = -2; n30 <= 2; ++n30) {
-        float y1 = phi10 + TWO_PI * (float)n10;
-        float y2 = phi20 + TWO_PI * (float)n20;
-        float y3 = phi30 + TWO_PI * (float)n30;
+        if (lb[n10 - n20 + n30 + 6] > bound) continue;
+        /* Explicit FMAs so -ffast-math cannot reschedule the rounding. This
+         * is the order GCC 14 emitted for the exhaustive loop, which keeps
+         * (gx, gy, cost) bit-identical to it (tests/perf/pg_bench checks).
+         * Do not rewrite as plain expressions. */
+        float y1 = fmaf((float)n10, TWO_PI, phi10);
+        float y2 = fmaf((float)n20, TWO_PI, phi20);
+        float y3 = fmaf((float)n30, TWO_PI, phi30);
 
         float gx = (y3 - y1) * inv_sqrt3;
-        float gy = (y1 + 2.0f * y2 + y3) * (1.0f / 3.0f);
+        float gy = (fmaf(y2, 2.0f, y1) + y3) * (1.0f / 3.0f);
 
-        float p1 = -0.8660254037844386f * gx + 0.5f * gy;
-        float p2 = gy;
-        float p3 =  0.8660254037844386f * gx + 0.5f * gy;
-
-        float r1 = y1 - p1, r2 = y2 - p2, r3 = y3 - p3;
-        float cost = r1 * r1 + r2 * r2 + r3 * r3 + reg * (gx * gx + gy * gy);
+        float r1 = fmaf(-0.5f, gy, fmaf(c30, gx, y1));
+        float r2 = y2 - gy;
+        float r3 = fmaf(-0.5f, gy, fmaf(-c30, gx, y3));
+        float g2 = fmaf(gy, gy, gx * gx);
+        float cost = fmaf(g2, reg, fmaf(r2, r2, fmaf(r1, r1, r3 * r3)));
 
         if (cost < best_cost) {
             best_cost = cost;

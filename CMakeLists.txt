@@ -14,6 +14,7 @@ add_executable(quadrf-phasegaze
     src/csi_dev.c
     src/tuner.c
     src/dsp.c
+    src/hop.c
     src/server.c
     src/external/mongoose.c
 )

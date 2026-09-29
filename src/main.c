@@ -26,44 +26,16 @@
 
 #include "csi_dev.h"
 #include "tuner.h"
-#include "dsp.h"
+#include "hop.h"
 #include "server.h"
 #include "pg_stream.h"
 #include "external/mongoose.h"
 
-// ---------------------------------------------------------------------------
-// 4-lane CSI, nominally "38 Msps". Measured 37.3726 Msps: the 16384-sample
-// span period is 438.39 us, and a 10 MHz LO step moves an OFDM signal by
-// 2192.15 bins of 8192 (38 Msps would be 2155.8). FFT 8192 gives ~4.6 kHz
-// bins. LO step is the digital-filter BW.
-// ---------------------------------------------------------------------------
-
 #define DEVICE_PATH      "/dev/csi_stream0"
-#define FFT_SIZE         8192
-#define CHANNELS         4
-#define BYTES_PER_IQ     2
-#define BYTES_PER_FRAME  (CHANNELS * BYTES_PER_IQ)
-#define BLOCK_BYTES      (FFT_SIZE * BYTES_PER_FRAME)
 
 #define HW_LO_MIN_MHZ    4900.0
 #define HW_LO_MAX_MHZ    6100.0
 #define RF_GAIN_MAX      63
-#define LO_STEP_MHZ      20.0
-#define FS_MHZ           37.3726
-#define DC_GUARD_BINS    4
-
-#define ANTENNA_SPACING_M   0.0455f
-#define D_LAMBDA_PER_MHZ    (ANTENNA_SPACING_M / 299.792458f)
-#define SCALE_FACTOR_AT_MHZ(f) (2.0f * 3.14159265358979f * D_LAMBDA_PER_MHZ * (f))
-
-#define CFAR_WIN         64
-#define CFAR_GUARD       8
-#define CFAR_THRESH      1.6f   /* same as csi_sweep; 1.2 filled top-K with noise */
-#define TOPK_BASE        512
-/* Drop DOA solves whose 3-baseline residual is not a plane wave. */
-#define DOA_COST_MAX     0.35f
-/* Skip a dwell when the CS8 block never leaves the 1-LSB grid (starved ADC). */
-#define ADC_PEAK_MIN     3
 
 #define MAX_LO_STEPS     128
 #define MAX_FRAME_POINTS 16384
@@ -241,6 +213,11 @@ static int freq_in_bands(const settings_t *s, double f)
     return 0;
 }
 
+static int keep_rf(double rf_mhz, const void *arg)
+{
+    return freq_in_bands((const settings_t *)arg, rf_mhz);
+}
+
 /* One LO at the center of each 20 MHz slice. RANGE and WIFI share this
  * so 5490–5730 and UNII-2C 80s (106/122/138) hop the same grid. */
 static void plan_add_span(sweep_plan_t *p, double a, double b)
@@ -321,12 +298,8 @@ typedef struct {
 
 typedef struct {
     uint8_t       *blk;
-    float         *vraw;
-    dsp_peak_t    *topk;
     pg_point_t    *pts;
-    fftwf_complex *fin;
-    fftwf_complex *fout[CHANNELS];
-    fftwf_plan     plan[CHANNELS];
+    hop_ctx_t      hop;
     pthread_t      th;
 } wctx_t;
 
@@ -542,13 +515,6 @@ static void *worker(void *arg)
         if (c != TUNER_CPU) CPU_SET(c, &cs);
     pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 
-    const int half = FFT_SIZE / 2;
-    /* Keep detections inside the digital-filter passband (±LO_STEP/2 around DC). */
-    int k_min = half - (int)((LO_STEP_MHZ / 2.0) * ((double)FFT_SIZE / FS_MHZ));
-    int k_max = half + (int)((LO_STEP_MHZ / 2.0) * ((double)FFT_SIZE / FS_MHZ));
-    if (k_min < 0) k_min = 0;
-    if (k_max > FFT_SIZE - 1) k_max = FFT_SIZE - 1;
-
     settings_t set_snap;
     while (!g_quit) {
         pthread_mutex_lock(&g_set.mtx);
@@ -563,85 +529,17 @@ static void *worker(void *arg)
         int active_topk = (int)((float)TOPK_BASE * set_snap.output_fraction);
         if (active_topk < 1) active_topk = 1;
         const double lo = tag.lo;
-        const float vmax = g_vmax;
 
-        const int8_t *s8 = (const int8_t *)w->blk;
-        int blk_peak = 0;
-        /* 65536 * 128^2 < 2^31, so int32 is exact and the loop vectorizes
-         * (41 -> 11 us on the A76 versus a double accumulator). */
-        int32_t sumsq_i = 0;
-        for (int i = 0; i < BLOCK_BYTES; ++i) {
-            int sv = (int)s8[i];
-            int a = sv < 0 ? -sv : sv;
-            blk_peak = a > blk_peak ? a : blk_peak;
-            sumsq_i += sv * sv;
-        }
-        double sumsq = (double)sumsq_i;
-        if (blk_peak < ADC_PEAK_MIN) {
-            frame_contribute(acc, NULL, 0, 0.0f, blk_peak, sumsq, BLOCK_BYTES,
-                             NULL, lo, k_min, k_max);
-            continue;
-        }
-
-        for (int c = 0; c < CHANNELS; ++c) {
-            dsp_cs8_extract_rotate(s8, c, (float *)w->fin, FFT_SIZE, 1.0f, 0.0f);
-            fftwf_execute(w->plan[c]);
-        }
-        float *chp[CHANNELS] = {
-            (float *)w->fout[0], (float *)w->fout[1],
-            (float *)w->fout[2], (float *)w->fout[3]
-        };
-        dsp_power4_log_shifted(chp, w->vraw, FFT_SIZE, DC_GUARD_BINS);
-
-        int hsz = dsp_cfar_topk(w->vraw, k_min, k_max, CFAR_WIN, CFAR_GUARD,
-                                CFAR_THRESH, w->topk, active_topk);
-
-        uint32_t npts = 0;
-        float vmax_hop = 1e-9f;
-        for (int t = 0; t < hsz; ++t) {
-            int k = w->topk[t].k;
-            int i = (k + half) % FFT_SIZE;
-            double rf = lo + FS_MHZ * ((double)k - (double)half) / (double)FFT_SIZE;
-
-            if (!freq_in_bands(&set_snap, rf)) continue;
-
-            float re0 = w->fout[0][i][0], im0 = w->fout[0][i][1];
-            float re1 = w->fout[1][i][0], im1 = w->fout[1][i][1];
-            float re2 = w->fout[2][i][0], im2 = w->fout[2][i][1];
-            float re3 = w->fout[3][i][0], im3 = w->fout[3][i][1];
-
-            float phi10 = atan2f(im1 * re0 - re1 * im0, re1 * re0 + im1 * im0);
-            float phi23 = atan2f(im2 * re3 - re2 * im3, re2 * re3 + im2 * im3);
-            float phi20 = atan2f(im2 * re0 - re2 * im0, re2 * re0 + im2 * im0);
-            float phi30 = atan2f(im3 * re0 - re3 * im0, re3 * re0 + im3 * im0);
-            float phi21 = atan2f(im2 * re1 - re2 * im1, re2 * re1 + im2 * im1);
-
-            phi10 = atan2f(sinf(phi10) + sinf(phi23), cosf(phi10) + cosf(phi23));
-            phi30 = atan2f(sinf(phi30) + sinf(phi21), cosf(phi30) + cosf(phi21));
-
-            float gx, gy;
-            float cost = dsp_solve_gradient(phi10, phi20, phi30, &gx, &gy);
-            if (cost > DOA_COST_MAX) continue;
-
-            float scale = SCALE_FACTOR_AT_MHZ((float)rf);
-            float u = gx / scale, v = gy / scale;
-            if (u * u + v * v > 1.0f) continue;
-
-            float vk = w->vraw[k];
-            float inten = vk / vmax;
-            if (inten > 1.0f) inten = 1.0f;
-            if (inten < 0.0f) inten = 0.0f;
-            if (vk > vmax_hop) vmax_hop = vk;
-
-            w->pts[npts].u = u;
-            w->pts[npts].v = v;
-            w->pts[npts].freq_mhz = (float)rf;
-            w->pts[npts].intensity = inten;
-            npts++;
-        }
-
-        frame_contribute(acc, w->pts, npts, vmax_hop, blk_peak, sumsq, BLOCK_BYTES,
-                         w->vraw, lo, k_min, k_max);
+        hop_out_t o;
+        hop_run(&w->hop, (const int8_t *)w->blk, lo, g_vmax, active_topk,
+                keep_rf, &set_snap, w->pts, &o);
+        if (!o.ran)
+            frame_contribute(acc, NULL, 0, 0.0f, o.adc_peak, o.adc_sumsq,
+                             BLOCK_BYTES, NULL, lo, w->hop.k_min, w->hop.k_max);
+        else
+            frame_contribute(acc, w->pts, o.npts, o.vmax_hop, o.adc_peak,
+                             o.adc_sumsq, BLOCK_BYTES, w->hop.vraw, lo,
+                             w->hop.k_min, w->hop.k_max);
     }
     return NULL;
 }
@@ -649,37 +547,16 @@ static void *worker(void *arg)
 static int wctx_init(wctx_t *w)
 {
     w->blk = malloc(BLOCK_BYTES);
-    w->vraw = malloc(FFT_SIZE * sizeof(float));
-    w->topk = malloc(TOPK_BASE * sizeof(dsp_peak_t));
     w->pts = malloc(TOPK_BASE * sizeof(pg_point_t));
-    w->fin = fftwf_malloc(sizeof(fftwf_complex) * FFT_SIZE);
-    if (!w->blk || !w->vraw || !w->topk || !w->pts || !w->fin)
+    if (!w->blk || !w->pts)
         return -1;
-    /* FFTW planning is not thread-safe; plan here, execute in the workers.
-     * MEASURE picks a 4x-FFT set that runs in 150 us instead of 228 us
-     * with ESTIMATE. Only the first plan measures; the rest hit wisdom. */
-    for (int c = 0; c < CHANNELS; ++c) {
-        w->fout[c] = fftwf_malloc(sizeof(fftwf_complex) * FFT_SIZE);
-        if (!w->fout[c])
-            return -1;
-        w->plan[c] = fftwf_plan_dft_1d(FFT_SIZE, w->fin, w->fout[c],
-                                       FFTW_FORWARD, FFTW_MEASURE);
-        if (!w->plan[c])
-            return -1;
-    }
-    return 0;
+    return hop_init(&w->hop);
 }
 
 static void wctx_free(wctx_t *w)
 {
-    for (int c = 0; c < CHANNELS; ++c) {
-        if (w->plan[c]) fftwf_destroy_plan(w->plan[c]);
-        if (w->fout[c]) fftwf_free(w->fout[c]);
-    }
-    if (w->fin) fftwf_free(w->fin);
+    hop_free(&w->hop);
     free(w->pts);
-    free(w->topk);
-    free(w->vraw);
     free(w->blk);
 }
 
