@@ -1569,8 +1569,11 @@ export class Ui {
         this.state = st;
         if (!this._gainDraggingRef()) {
             // don't fight the user's finger; adopt backend gain otherwise
-            this.s.hwGain = Math.max(0, Math.min(RF_GAIN_MAX, st.gain | 0));
-            this._layoutGain();
+            const g = Math.max(0, Math.min(RF_GAIN_MAX, st.gain | 0));
+            if (g !== this.s.hwGain) {
+                this.s.hwGain = g;
+                this._layoutGain();
+            }
         }
     }
 

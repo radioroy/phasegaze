@@ -14,6 +14,14 @@ export const SF_PER_MHZ = 2 * Math.PI * 0.0455 / 299.792458; // 2*pi*d/lambda pe
 const ORBIT_HOME = 2.45;      // default orbit radius (scroll zoom)
 const CAPACITY = 65536;
 
+// Per-frame scratch, so render() allocates nothing.
+const _AXIS_X = new THREE.Vector3(1, 0, 0);
+const _AXIS_Y = new THREE.Vector3(0, 1, 0);
+const _qA = new THREE.Quaternion();
+const _qFwd = new THREE.Quaternion();
+const _qYaw = new THREE.Quaternion();
+const _qPitch = new THREE.Quaternion();
+
 // Reciprocal lattice basis (see phasegaze rf_math.js).
 const R1X = 4 * Math.PI / Math.sqrt(3);
 const R2X = 2 * Math.PI / Math.sqrt(3);
@@ -513,19 +521,30 @@ export class VrfRenderer {
             : IDENT_Q;
         const birth = this.now();
 
-        let lo = this.head, wrapped = false;
+        /* Straight into the attribute arrays: same values setXY/setXYZW
+         * would store (none of these attributes is normalized). */
+        const grad = this.aGrad.array, aux = this.aAux.array, quat = this.aQuat.array;
+        const q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
+        const lo = this.head;
+        let j = lo, wrapped = false;
         for (let i = 0; i < n; i++) {
             const u = f32[i * 4], v = f32[i * 4 + 1];
             const freq = f32[i * 4 + 2], inten = f32[i * 4 + 3];
             const sf = SF_PER_MHZ * freq;
-            const j = this.head;
-            this.aGrad.setXY(j, u * sf, v * sf);
-            this.aAux.setXYZW(j, freq, inten, birth, 0);
-            this.aQuat.setXYZW(j, q[0], q[1], q[2], q[3]);
-            this.head = (this.head + 1) % CAPACITY;
-            if (this.head === 0) wrapped = true;
-            if (this.used < CAPACITY) this.used++;
+            grad[j * 2] = u * sf;
+            grad[j * 2 + 1] = v * sf;
+            aux[j * 4] = freq;
+            aux[j * 4 + 1] = inten;
+            aux[j * 4 + 2] = birth;
+            aux[j * 4 + 3] = 0;
+            quat[j * 4] = q0;
+            quat[j * 4 + 1] = q1;
+            quat[j * 4 + 2] = q2;
+            quat[j * 4 + 3] = q3;
+            if (++j === CAPACITY) { j = 0; wrapped = true; }
         }
+        this.head = j;
+        this.used = Math.min(CAPACITY, this.used + n);
         this._fresh = Math.min(CAPACITY, this._fresh + n);
 
         // Upload just the touched span (full upload on wrap, which is rare).
@@ -725,7 +744,7 @@ export class VrfRenderer {
         // stabilization view quat (AR path)
         const qv = this.pointUniforms.uQuatView.value;
         if (this.imuEnabled) {
-            const q = this.imuQuat.clone().invert();
+            const q = _qA.copy(this.imuQuat).invert();
             qv.set(q.x, q.y, q.z, q.w);
         } else qv.set(0, 0, 0, 1);
 
@@ -762,11 +781,11 @@ export class VrfRenderer {
         if (this.morph > 0.02 && this.sphereCam === 'inside') {
             this.controls.enabled = false;
             this.camera.position.set(0, 0, 0);
-            const q = new THREE.Quaternion();
+            const q = _qA.identity();
             if (this.imuEnabled) q.copy(this.imuQuat);
-            const qFwd = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
-            const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.insideYaw);
-            const qPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), this.insidePitch);
+            const qFwd = _qFwd.setFromAxisAngle(_AXIS_Y, Math.PI);
+            const qYaw = _qYaw.setFromAxisAngle(_AXIS_Y, this.insideYaw);
+            const qPitch = _qPitch.setFromAxisAngle(_AXIS_X, this.insidePitch);
             this.camera.quaternion.copy(q).multiply(qFwd).multiply(qYaw).multiply(qPitch);
         } else {
             this.controls.enabled = this.morph > 0.5 && !this._viewReset;
