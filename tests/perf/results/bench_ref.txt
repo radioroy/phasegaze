@@ -1,0 +1,5 @@
+gain    hits    pts |     adc extract     fft   power    cfar     doa  ref_tot   (us/hop)
+20      53.9   53.9 |    11.1    58.7   148.3    25.6    26.0    43.5    313.4
+45      19.5   19.5 |    11.1    58.1   148.4    25.5    24.9    15.7    283.9
+63      14.3   14.3 |    11.0    58.1   147.1    25.4    24.7    11.5    278.1
+solver ref: 567.8 ns/call, accept 32.28% (uniform random phases)

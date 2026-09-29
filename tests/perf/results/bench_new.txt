@@ -1,0 +1,10 @@
+compare: 720 hops, 21046 points, point mismatches 0 (max |du|+|dv| 0, max |dI| 0), keep-band vraw mismatches 0, meta mismatches 0
+gain    hits    pts |     adc extract     fft   power    cfar     doa  ref_tot  new_tot speedup   (us/hop)
+20      53.9   53.9 |    11.0    58.5   147.4    25.4    25.7    43.1    311.4    245.2   1.27x
+45      19.5   19.5 |    11.1    58.5   148.5    25.5    24.9    15.7    284.4    225.9   1.26x
+63      14.3   14.3 |    10.9    58.4   147.5    25.4    24.7    11.5    278.8    222.7   1.25x
+new stages (gain 45): split4 25.1  fft 153.9  power 14.0  cfar 24.8 us/hop
+cfar same input: ref copy 24.7 us, live copy 24.7 us
+solver ref: 567.7 ns/call, accept 32.28% (uniform random phases)
+solver new: 117.9 ns/call (4.8x). accept/reject flips 0, accepted with any bit difference in gx/gy/cost 0 of 1291230 (max |dg| 0)
+solver plane-wave set: 4000000 accepted, flips 0, bit differences 0
