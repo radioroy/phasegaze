@@ -40,6 +40,7 @@ const CAM_HIDE_MS = 8000;
 
 const DEFAULTS = {
     size: 15, gain: 4.0, decay: 1, density: 100,
+    balanceDb: 10, closureDeg: 0, spurMask: true, bgNorm: true, cfarDb: 7, spurMargin: 3,
     pulse: false, flip: false,
     mirrors: true, bottom: false, tiles: true, rings: true,
     scheme: 'spectrum', targetLut: 'iron', targetFreq: 5500, targetWidth: 40,
@@ -83,6 +84,14 @@ function decayLabel(v) {
     if (v >= 100) return 'HOLD';
     return `${decayTau(v).toFixed(2)} S`;
 }
+/* Strongest RX over second strongest at the bin; 0 turns the gate off. */
+function balLabel(v) { return v <= 0 ? 'OFF' : `${v.toFixed(0)} DB`; }
+/* Max parallelogram closure |phi0 - phi1 + phi2 - phi3|; 0 or 180 is off. */
+function closLabel(v) { return (v <= 0 || v >= 180) ? 'OFF' : `${v.toFixed(0)}°`; }
+/* CFAR: bin over the local log-power mean. Spur margin: x the visits of
+ * the busiest LO, lower masks more. */
+function cfarLabel(v) { return `${v.toFixed(1)} DB`; }
+function spmLabel(v) { return `${v.toFixed(1)}\u00d7`; }
 
 const $ = (id) => document.getElementById(id);
 
@@ -93,6 +102,12 @@ export class Ui {
 
         this.s = { ...DEFAULTS, ...this._load() };
         this.s.hwGain = Math.max(0, Math.min(RF_GAIN_MAX, this.s.hwGain | 0));
+        if (!Number.isFinite(this.s.balanceDb)) this.s.balanceDb = DEFAULTS.balanceDb;
+        if (!Number.isFinite(this.s.closureDeg)) this.s.closureDeg = DEFAULTS.closureDeg;
+        if (typeof this.s.spurMask !== 'boolean') this.s.spurMask = true;
+        if (typeof this.s.bgNorm !== 'boolean') this.s.bgNorm = true;
+        if (!Number.isFinite(this.s.cfarDb)) this.s.cfarDb = DEFAULTS.cfarDb;
+        if (!Number.isFinite(this.s.spurMargin)) this.s.spurMargin = DEFAULTS.spurMargin;
         this.s.accent = parseHex(this.s.accent) || ACCENT_DEFAULT;
         if (!TARGET_LUTS.includes(this.s.targetLut)) this.s.targetLut = 'iron';
         if (typeof this.s.fft !== 'boolean') this.s.fft = true;
@@ -229,10 +244,18 @@ export class Ui {
             this._drawFft();
     }
 
+    _gateMsg() {
+        const deg = this.s.closureDeg >= 180 ? 0 : this.s.closureDeg;
+        return { balance_db: this.s.balanceDb, closure_max: deg * Math.PI / 180,
+            spur_mask: this.s.spurMask ? 1 : 0, bg_norm: this.s.bgNorm ? 1 : 0,
+            cfar_db: this.s.cfarDb,
+            spur_margin: this.s.spurMargin };
+    }
+
     /* Backend re-sync (on connect). */
     pushBackend() {
         this.net.set({ gain: this.s.hwGain, output_fraction: this.s.density / 100,
-            spectrum: this.s.fft ? 1 : 0 });
+            spectrum: this.s.fft ? 1 : 0, ...this._gateMsg() });
         if (this.s.scheme === 'target') this._applyTargetSweep(true);
         else this._applyManualRange(true);
     }
@@ -1454,6 +1477,12 @@ export class Ui {
             this.save();
             this.net.set({ output_fraction: this.s.density / 100 });
         };
+        bindRange('bal', 'balanceDb', balLabel, () => {});
+        bindRange('clos', 'closureDeg', closLabel, () => {});
+        bindRange('cfar', 'cfarDb', cfarLabel, () => {});
+        bindRange('spm', 'spurMargin', spmLabel, () => {});
+        for (const id of ['bal', 'clos', 'cfar', 'spm'])
+            $(`s-${id}`).onchange = () => { this.save(); this.net.set(this._gateMsg()); };
 
         const bindToggle = (id, key, apply) => {
             const el = $(`t-${id}`);
@@ -1469,6 +1498,8 @@ export class Ui {
         bindToggle('bottom', 'bottom', v => this.renderer.setBottom(v));
         bindToggle('tiles', 'tiles', v => this.renderer.setTiles(v));
         bindToggle('rings', 'rings', v => this.renderer.setRings(v));
+        bindToggle('spur', 'spurMask', () => this.net.set(this._gateMsg()));
+        bindToggle('bgn', 'bgNorm', () => this.net.set(this._gateMsg()));
 
         const accent = $('s-accent');
         accent.oninput = () => {
@@ -1479,6 +1510,11 @@ export class Ui {
             this._applyAccent();
         };
         accent.onchange = () => this.save();
+
+        /* State is only pushed on changes; poll it for the hit readout. */
+        setInterval(() => {
+            if ($('set-pop').classList.contains('open')) this.net.send({ type: 'get_state' });
+        }, 1000);
 
         $('s-clear').onclick = () => this.renderer.clearPoints();
         $('s-defaults').onclick = () => this._restoreDefaults();
@@ -1502,10 +1538,15 @@ export class Ui {
         $('s-gain').value = this.s.gain; $('v-gain').textContent = this.s.gain.toFixed(1);
         $('s-decay').value = this.s.decay; $('v-decay').textContent = decayLabel(this.s.decay);
         $('s-dens').value = this.s.density; $('v-dens').textContent = `${this.s.density.toFixed(0)}%`;
+        $('s-bal').value = this.s.balanceDb; $('v-bal').textContent = balLabel(this.s.balanceDb);
+        $('s-clos').value = this.s.closureDeg; $('v-clos').textContent = closLabel(this.s.closureDeg);
+        $('s-cfar').value = this.s.cfarDb; $('v-cfar').textContent = cfarLabel(this.s.cfarDb);
+        $('s-spm').value = this.s.spurMargin; $('v-spm').textContent = spmLabel(this.s.spurMargin);
         $('s-accent').value = this.s.accent;
         $('v-accent').textContent = this.s.accent.toUpperCase();
         const tmap = { pulse: 'pulse', flip: 'flip',
-                       bottom: 'bottom', tiles: 'tiles', rings: 'rings' };
+                       bottom: 'bottom', tiles: 'tiles', rings: 'rings', spur: 'spurMask',
+                       bgn: 'bgNorm' };
         for (const [id, key] of Object.entries(tmap))
             $(`t-${id}`).classList.toggle('on', !!this.s[key]);
         $('btn-mirror').classList.toggle('on', !!this.s.mirrors);
@@ -1566,6 +1607,7 @@ export class Ui {
     // ==================================================================
 
     onState(st) {
+        this._gateRates(st);
         this.state = st;
         if (!this._gainDraggingRef()) {
             // don't fight the user's finger; adopt backend gain otherwise
@@ -1575,6 +1617,20 @@ export class Ui {
                 this._layoutGain();
             }
         }
+    }
+
+    /* Gate counters are cumulative; show per-second hits and the share each
+     * stage rejects since the previous state message. */
+    _gateRates(st) {
+        const g = st.gates, prev = this.state && this.state.gates;
+        const now = performance.now();
+        const dt = (now - (this._gateT || now)) / 1000;
+        this._gateT = now;
+        if (!g || !prev || dt <= 0 || g.hits < prev.hits) return;
+        const hits = g.hits - prev.hits;
+        const pct = k => hits > 0 ? `${Math.round(100 * (g[k] - prev[k]) / hits)}%` : '-';
+        $('v-rej').textContent = `${(hits / dt / 1000).toFixed(1)}K/S  ` +
+            `SPUR ${pct('rej_spur')}  BAL ${pct('rej_balance')}  CLOS ${pct('rej_closure')}`;
     }
 
     setStatus(kind) {
