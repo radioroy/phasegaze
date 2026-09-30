@@ -6,6 +6,17 @@
 #include <stdlib.h>
 
 #define DC_GUARD_BINS    4
+/* Board spur comb at every multiple of 40 MHz RF, measured at 5200, 5520,
+ * 5760, 5800 and 5840 with the LO anywhere in the slice. It is coherent
+ * across the four RX, so it solves to one fixed direction and, as the
+ * strongest bin of the sweep, sets vmax and dims every real emitter. On the
+ * 5745 grid it lands 5 MHz off LO for ch 153/161/169/177; the 5180 and 5500
+ * grids put it on DC or outside the keep band. +-3 bins (+-14 kHz) covers
+ * the rectangular-window main lobe and first sidelobes of an off-bin tone.
+ * IQ imbalance mirrors it about the LO (5800 -> 5810 at LO 5805) at enough
+ * level to still own vmax, so the image bins are cut as well. */
+#define SPUR_STEP_MHZ    40.0
+#define SPUR_GUARD_BINS  3
 
 #define ANTENNA_SPACING_M   0.0455f
 #define D_LAMBDA_PER_MHZ    (ANTENNA_SPACING_M / 299.792458f)
@@ -94,6 +105,22 @@ void hop_run(hop_ctx_t *h, const int8_t *blk, double lo, float vmax, int topk,
      * and the spectrum fold all stay in [k_min, k_max]. */
     dsp_power4_log_shifted_range(chp, h->vraw, FFT_SIZE, DC_GUARD_BINS,
                                  h->k_min, h->k_max);
+
+    {
+        const double bin_mhz = FS_MHZ / (double)FFT_SIZE;
+        double f0 = lo + bin_mhz * (double)(h->k_min - half);
+        double f1 = lo + bin_mhz * (double)(h->k_max - half);
+        for (double s = ceil(f0 / SPUR_STEP_MHZ) * SPUR_STEP_MHZ; s <= f1;
+             s += SPUR_STEP_MHZ) {
+            int ks = (int)lround((s - lo) / bin_mhz);
+            for (int side = -1; side <= 1; side += 2)
+                for (int d = -SPUR_GUARD_BINS; d <= SPUR_GUARD_BINS; ++d) {
+                    int k = half + side * ks + d;
+                    if (k >= h->k_min && k <= h->k_max)
+                        h->vraw[k] = 0.0f;
+                }
+        }
+    }
 
     int hsz = dsp_cfar_topk(h->vraw, h->k_min, h->k_max, CFAR_WIN, CFAR_GUARD,
                             CFAR_THRESH, h->topk, topk);

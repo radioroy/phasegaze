@@ -109,6 +109,21 @@ int ref_hop(ref_ctx_t *w, const uint8_t *blk, double lo, float vmax,
         (float *)w->fout[2], (float *)w->fout[3]
     };
     ref_power4_log_shifted(chp, w->vraw, FFT_SIZE, DC_GUARD_BINS);
+    /* Same 40 MHz spur + image notch as src/hop.c, so the compare stays exact. */
+    {
+        const double bin_mhz = FS_MHZ / (double)FFT_SIZE;
+        double f0 = lo + bin_mhz * (double)(k_min - half);
+        double f1 = lo + bin_mhz * (double)(k_max - half);
+        for (double s = ceil(f0 / 40.0) * 40.0; s <= f1; s += 40.0) {
+            int ks = (int)lround((s - lo) / bin_mhz);
+            for (int side = -1; side <= 1; side += 2)
+                for (int d = -3; d <= 3; ++d) {
+                    int k = half + side * ks + d;
+                    if (k >= k_min && k <= k_max)
+                        w->vraw[k] = 0.0f;
+                }
+        }
+    }
     uint64_t t3 = ns();
     t->power += t3 - t2;
 
