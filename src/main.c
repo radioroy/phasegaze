@@ -41,6 +41,17 @@
 #define MAX_FRAME_POINTS 16384
 #define MAX_BANDS        32
 
+/* Off: real emitters indoors close anywhere in +-pi (multipath, uncalibrated
+ * per-RX phase), and 1.02 rad (the old DOA_COST_MAX 0.35) dropped 50-73% of
+ * repeatable emitters on a healthy board. */
+#define CLOSURE_MAX_DEFAULT  0.0f
+#define BALANCE_DB_DEFAULT   10.0f
+#define BALANCE_LIN_DEFAULT  10.0f
+/* hop.c CFAR_THRESH is 1.6 (6.95 dB); the UI moves in 0.5 dB steps. */
+#define CFAR_DB_DEFAULT      7.0f
+#define DB_TO_LN             0.23025851f
+#define SPUR_MARGIN_DEFAULT  3.0f
+
 
 typedef struct {
     pthread_mutex_t mtx;
@@ -51,6 +62,13 @@ typedef struct {
     float    output_fraction;
     int      gain;
     int      spectrum;
+    float    closure_max;   /* rad, 0 = off */
+    float    balance_db;    /* dB, 0 = off */
+    int      spur_mask;     /* learned fixed-offset spur mask on/off */
+    int      bg_norm;       /* receiver background normalization on/off */
+    float    cfar_db;       /* CFAR threshold over the local log mean */
+    float    spur_margin;   /* spur mask trip, x busiest-LO visits */
+    hop_gates_t gates;      /* derived from the two above */
 } settings_t;
 
 static settings_t g_set = {
@@ -62,7 +80,21 @@ static settings_t g_set = {
     .output_fraction = 1.00f,
     .gain = 45,
     .spectrum = 0,
+    .closure_max = CLOSURE_MAX_DEFAULT,
+    .balance_db = BALANCE_DB_DEFAULT,
+    .spur_mask = 1,
+    .bg_norm = 1,
+    .cfar_db = CFAR_DB_DEFAULT,
+    .spur_margin = SPUR_MARGIN_DEFAULT,
+    .gates = { .closure_max = CLOSURE_MAX_DEFAULT,
+               .balance_max = BALANCE_LIN_DEFAULT,
+               .cfar_thresh = CFAR_DB_DEFAULT * DB_TO_LN,
+               .spur_margin = SPUR_MARGIN_DEFAULT },
 };
+
+static struct {
+    uint64_t hits, rej_balance, rej_closure, rej_spur;
+} g_gstats;
 
 static csi_dev_t g_dev;
 static volatile sig_atomic_t g_quit = 0;
@@ -117,6 +149,38 @@ static int on_control(const char *msg, size_t len, void *user)
         }
         if (mg_json_get_num(json, "$.spectrum", &d))
             g_set.spectrum = d != 0;
+        if (mg_json_get_num(json, "$.closure_max", &d)) {
+            float c = (float)fmax(0.0, fmin(M_PI, d));
+            g_set.closure_max = c;
+            g_set.gates.closure_max = c;
+            changed = 1;
+        }
+        if (mg_json_get_num(json, "$.balance_db", &d)) {
+            float b = (float)fmax(0.0, fmin(40.0, d));
+            g_set.balance_db = b;
+            g_set.gates.balance_max = b > 0.0f ? powf(10.0f, b / 10.0f) : 0.0f;
+            changed = 1;
+        }
+        if (mg_json_get_num(json, "$.spur_mask", &d)) {
+            g_set.spur_mask = d != 0;
+            changed = 1;
+        }
+        if (mg_json_get_num(json, "$.bg_norm", &d)) {
+            g_set.bg_norm = d != 0;
+            changed = 1;
+        }
+        if (mg_json_get_num(json, "$.cfar_db", &d)) {
+            float c = (float)fmax(2.0, fmin(20.0, d));
+            g_set.cfar_db = c;
+            g_set.gates.cfar_thresh = c * DB_TO_LN;
+            changed = 1;
+        }
+        if (mg_json_get_num(json, "$.spur_margin", &d)) {
+            float m = (float)fmax(1.0, fmin(10.0, d));
+            g_set.spur_margin = m;
+            g_set.gates.spur_margin = m;
+            changed = 1;
+        }
         int sweep_changed = 0;
         if (mg_json_get_num(json, "$.lo_start", &d)) {
             g_set.lo_start = fmax(HW_LO_MIN_MHZ, fmin(HW_LO_MAX_MHZ, d));
@@ -177,6 +241,10 @@ static void state_json(char *buf, size_t cap, void *user)
         "{\"type\":\"state\",\"lo_start\":%.1f,\"lo_end\":%.1f,"
         "\"hw_min\":%.1f,\"hw_max\":%.1f,\"lo_step\":%.1f,"
         "\"gain\":%d,\"output_fraction\":%.3f,"
+        "\"closure_max\":%.3f,\"balance_db\":%.1f,\"spur_mask\":%d,"
+        "\"bg_norm\":%d,\"cfar_db\":%.2f,\"spur_margin\":%.2f,"
+        "\"gates\":{\"hits\":%llu,\"rej_balance\":%llu,\"rej_closure\":%llu,"
+        "\"rej_spur\":%llu},"
         "\"fps\":%.2f,\"points\":%u,\"adc_peak\":%d,\"adc_rms\":%.2f,"
         "\"lna_db\":%d,\"vga_db\":%d,"
         "\"tuner\":{\"rt\":%d,\"spans\":%llu,\"retunes\":%llu,\"deferred\":%llu,"
@@ -187,6 +255,12 @@ static void state_json(char *buf, size_t cap, void *user)
         g_set.lo_start, g_set.lo_end,
         HW_LO_MIN_MHZ, HW_LO_MAX_MHZ, LO_STEP_MHZ,
         g_set.gain, g_set.output_fraction,
+        (double)g_set.closure_max, (double)g_set.balance_db, g_set.spur_mask,
+        g_set.bg_norm, (double)g_set.cfar_db, (double)g_set.spur_margin,
+        (unsigned long long)__atomic_load_n(&g_gstats.hits, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_gstats.rej_balance, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_gstats.rej_closure, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_gstats.rej_spur, __ATOMIC_RELAXED),
         (double)g_fps, g_last_points, g_adc_peak, (double)g_adc_rms,
         g_dev.analog_lna_db, g_dev.analog_vga_db,
         ts.rt, (unsigned long long)ts.spans, (unsigned long long)ts.retunes,
@@ -283,7 +357,7 @@ static void push_plan_locked(void)
 typedef struct {
     int      used, closed;
     uint32_t sweep;
-    int      claimed, done;
+    int      claimed, done, nhops;
     uint32_t npts;
     float    vmax_next;
     int      adc_peak;
@@ -323,7 +397,11 @@ static void frame_publish(frame_acc_t *a)
     }
     g_last_pub_ns = t;
 
-    if (a->vmax_next > 1e-9f) g_vmax = a->vmax_next;
+    /* A sweep cut short by a resync or a stalled retune can miss the hop
+     * holding the strongest emitter. Normalizing the next sweep by its vmax
+     * lifts every noise point toward 1.0 for one frame (a full-disk flash). */
+    if (a->vmax_next > 1e-9f && 4 * a->done >= 3 * a->nhops)
+        g_vmax = a->vmax_next;
     g_adc_peak = a->adc_peak;
     g_adc_rms = a->adc_n ? sqrtf((float)(a->adc_sumsq / (double)a->adc_n)) : 0.0f;
     g_last_points = a->npts;
@@ -391,6 +469,7 @@ static frame_acc_t *frame_register(const span_tag_t *t, int spectrum)
             a->frame = fb;
             a->used = 1;
             a->sweep = t->sweep;
+            a->nhops = t->nhops;
             a->vmax_next = 1e-9f;
             a->lo_start = t->lo_start;
             a->lo_end = t->lo_end;
@@ -530,9 +609,20 @@ static void *worker(void *arg)
         if (active_topk < 1) active_topk = 1;
         const double lo = tag.lo;
 
+        hop_gates_t gates = set_snap.gates;
+        gates.plan_los = tag.nhops;
+        gates.spur_mask = set_snap.spur_mask;
+        gates.bg_norm = set_snap.bg_norm;
+        gates.gain = set_snap.gain;
         hop_out_t o;
         hop_run(&w->hop, (const int8_t *)w->blk, lo, g_vmax, active_topk,
-                keep_rf, &set_snap, w->pts, &o);
+                keep_rf, &set_snap, &gates, w->pts, &o);
+        if (o.ran) {
+            __atomic_fetch_add(&g_gstats.hits, o.hits, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_gstats.rej_balance, o.rej_balance, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_gstats.rej_closure, o.rej_closure, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_gstats.rej_spur, o.rej_spur, __ATOMIC_RELAXED);
+        }
         if (!o.ran)
             frame_contribute(acc, NULL, 0, 0.0f, o.adc_peak, o.adc_sumsq,
                              BLOCK_BYTES, NULL, lo, w->hop.k_min, w->hop.k_max);
