@@ -40,7 +40,7 @@ const CAM_HIDE_MS = 8000;
 
 const DEFAULTS = {
     size: 15, gain: 4.0, decay: 1, density: 100,
-    balanceDb: 10, closureDeg: 0, spurMask: true, bgNorm: true, cfarDb: 7, spurMargin: 3,
+    balanceDb: 10, closureDeg: 0, bgNorm: true, cfarDb: 7,
     pulse: false, flip: false,
     mirrors: true, bottom: false, tiles: true, rings: true,
     scheme: 'spectrum', targetLut: 'iron', targetFreq: 5500, targetWidth: 40,
@@ -88,10 +88,8 @@ function decayLabel(v) {
 function balLabel(v) { return v <= 0 ? 'OFF' : `${v.toFixed(0)} DB`; }
 /* Max parallelogram closure |phi0 - phi1 + phi2 - phi3|; 0 or 180 is off. */
 function closLabel(v) { return (v <= 0 || v >= 180) ? 'OFF' : `${v.toFixed(0)}°`; }
-/* CFAR: bin over the local log-power mean. Spur margin: x the visits of
- * the busiest LO, lower masks more. */
+/* CFAR: bin over the local log-power mean. */
 function cfarLabel(v) { return `${v.toFixed(1)} DB`; }
-function spmLabel(v) { return `${v.toFixed(1)}\u00d7`; }
 
 const $ = (id) => document.getElementById(id);
 
@@ -104,10 +102,9 @@ export class Ui {
         this.s.hwGain = Math.max(0, Math.min(RF_GAIN_MAX, this.s.hwGain | 0));
         if (!Number.isFinite(this.s.balanceDb)) this.s.balanceDb = DEFAULTS.balanceDb;
         if (!Number.isFinite(this.s.closureDeg)) this.s.closureDeg = DEFAULTS.closureDeg;
-        if (typeof this.s.spurMask !== 'boolean') this.s.spurMask = true;
         if (typeof this.s.bgNorm !== 'boolean') this.s.bgNorm = true;
         if (!Number.isFinite(this.s.cfarDb)) this.s.cfarDb = DEFAULTS.cfarDb;
-        if (!Number.isFinite(this.s.spurMargin)) this.s.spurMargin = DEFAULTS.spurMargin;
+        delete this.s.spurMask; delete this.s.spurMargin;
         this.s.accent = parseHex(this.s.accent) || ACCENT_DEFAULT;
         if (!TARGET_LUTS.includes(this.s.targetLut)) this.s.targetLut = 'iron';
         if (typeof this.s.fft !== 'boolean') this.s.fft = true;
@@ -247,9 +244,7 @@ export class Ui {
     _gateMsg() {
         const deg = this.s.closureDeg >= 180 ? 0 : this.s.closureDeg;
         return { balance_db: this.s.balanceDb, closure_max: deg * Math.PI / 180,
-            spur_mask: this.s.spurMask ? 1 : 0, bg_norm: this.s.bgNorm ? 1 : 0,
-            cfar_db: this.s.cfarDb,
-            spur_margin: this.s.spurMargin };
+            bg_norm: this.s.bgNorm ? 1 : 0, cfar_db: this.s.cfarDb };
     }
 
     /* Backend re-sync (on connect). */
@@ -1480,8 +1475,7 @@ export class Ui {
         bindRange('bal', 'balanceDb', balLabel, () => {});
         bindRange('clos', 'closureDeg', closLabel, () => {});
         bindRange('cfar', 'cfarDb', cfarLabel, () => {});
-        bindRange('spm', 'spurMargin', spmLabel, () => {});
-        for (const id of ['bal', 'clos', 'cfar', 'spm'])
+        for (const id of ['bal', 'clos', 'cfar'])
             $(`s-${id}`).onchange = () => { this.save(); this.net.set(this._gateMsg()); };
 
         const bindToggle = (id, key, apply) => {
@@ -1498,7 +1492,6 @@ export class Ui {
         bindToggle('bottom', 'bottom', v => this.renderer.setBottom(v));
         bindToggle('tiles', 'tiles', v => this.renderer.setTiles(v));
         bindToggle('rings', 'rings', v => this.renderer.setRings(v));
-        bindToggle('spur', 'spurMask', () => this.net.set(this._gateMsg()));
         bindToggle('bgn', 'bgNorm', () => this.net.set(this._gateMsg()));
 
         const accent = $('s-accent');
@@ -1541,12 +1534,10 @@ export class Ui {
         $('s-bal').value = this.s.balanceDb; $('v-bal').textContent = balLabel(this.s.balanceDb);
         $('s-clos').value = this.s.closureDeg; $('v-clos').textContent = closLabel(this.s.closureDeg);
         $('s-cfar').value = this.s.cfarDb; $('v-cfar').textContent = cfarLabel(this.s.cfarDb);
-        $('s-spm').value = this.s.spurMargin; $('v-spm').textContent = spmLabel(this.s.spurMargin);
         $('s-accent').value = this.s.accent;
         $('v-accent').textContent = this.s.accent.toUpperCase();
         const tmap = { pulse: 'pulse', flip: 'flip',
-                       bottom: 'bottom', tiles: 'tiles', rings: 'rings', spur: 'spurMask',
-                       bgn: 'bgNorm' };
+                       bottom: 'bottom', tiles: 'tiles', rings: 'rings', bgn: 'bgNorm' };
         for (const [id, key] of Object.entries(tmap))
             $(`t-${id}`).classList.toggle('on', !!this.s[key]);
         $('btn-mirror').classList.toggle('on', !!this.s.mirrors);
