@@ -1,0 +1,36 @@
+== g45
+1768 kept blocks, gain 45, plan 28 LOs
+stage us/hop: split4 24.76  fft4 153.78  power+log 13.91  bg(apply+learn) 3.36
+  cfar  5.0 dB: 26.54 us/hop, 66.9 hits/hop (top-K 512)
+  cfar  6.0 dB: 25.45 us/hop, 33.3 hits/hop (top-K 512)
+  cfar  7.0 dB: 25.04 us/hop, 18.8 hits/hop (top-K 512)
+  cfar  8.0 dB: 24.82 us/hop, 11.2 hits/hop (top-K 512)
+  cfar 10.0 dB: 24.63 us/hop, 4.2 hits/hop (top-K 512)
+none             cfar  7.0 dB:  226.33 us/hop  hits/hop  18.37  rej_spur   0.00  rej_bal   0.00  pts/hop  18.37
+bal              cfar  7.0 dB:  219.99 us/hop  hits/hop  18.37  rej_spur   0.00  rej_bal   9.48  pts/hop   8.89
+bal+mask         cfar  7.0 dB:  229.52 us/hop  hits/hop  18.37  rej_spur  11.34  rej_bal   2.22  pts/hop   4.81
+bal+bg           cfar  7.0 dB:  231.86 us/hop  hits/hop   6.22  rej_spur   0.00  rej_bal   2.56  pts/hop   3.66
+bal+bg+mask      cfar  7.0 dB:  220.29 us/hop  hits/hop   6.22  rej_spur   0.27  rej_bal   2.48  pts/hop   3.47
+bg+mask          cfar  7.0 dB:  221.71 us/hop  hits/hop   6.22  rej_spur   0.27  rej_bal   0.00  pts/hop   5.95
+bal+mask c5      cfar  5.0 dB:  234.53 us/hop  hits/hop  66.61  rej_spur  29.14  rej_bal   6.97  pts/hop  30.50
+bal+bg+mask c5   cfar  5.0 dB:  235.92 us/hop  hits/hop  41.32  rej_spur   4.50  rej_bal   8.38  pts/hop  28.43
+bal+bg+mask c6   cfar  6.0 dB:  223.59 us/hop  hits/hop  15.01  rej_spur   0.35  rej_bal   5.76  pts/hop   8.90
+bal+bg+mask c9   cfar  9.0 dB:  218.47 us/hop  hits/hop   1.32  rej_spur   0.00  rej_bal   0.40  pts/hop   0.92
+== g20
+1762 kept blocks, gain 20, plan 28 LOs
+stage us/hop: split4 24.58  fft4 154.19  power+log 13.75  bg(apply+learn) 3.36
+  cfar  5.0 dB: 27.66 us/hop, 116.1 hits/hop (top-K 512)
+  cfar  6.0 dB: 26.54 us/hop, 80.0 hits/hop (top-K 512)
+  cfar  7.0 dB: 25.87 us/hop, 57.2 hits/hop (top-K 512)
+  cfar  8.0 dB: 25.43 us/hop, 41.0 hits/hop (top-K 512)
+  cfar 10.0 dB: 24.87 us/hop, 19.9 hits/hop (top-K 512)
+none             cfar  7.0 dB:  248.80 us/hop  hits/hop  56.99  rej_spur   0.00  rej_bal   0.00  pts/hop  56.99
+bal              cfar  7.0 dB:  234.03 us/hop  hits/hop  56.99  rej_spur   0.00  rej_bal  37.78  pts/hop  19.21
+bal+mask         cfar  7.0 dB:  223.95 us/hop  hits/hop  56.99  rej_spur  52.35  rej_bal   3.19  pts/hop   1.45
+bal+bg           cfar  7.0 dB:  227.55 us/hop  hits/hop   5.33  rej_spur   0.00  rej_bal   4.58  pts/hop   0.76
+bal+bg+mask      cfar  7.0 dB:  226.82 us/hop  hits/hop   5.33  rej_spur   0.09  rej_bal   4.48  pts/hop   0.76
+bg+mask          cfar  7.0 dB:  231.18 us/hop  hits/hop   5.33  rej_spur   0.09  rej_bal   0.00  pts/hop   5.24
+bal+mask c5      cfar  5.0 dB:  239.30 us/hop  hits/hop 116.00  rej_spur  99.56  rej_bal   5.32  pts/hop  11.12
+bal+bg+mask c5   cfar  5.0 dB:  245.18 us/hop  hits/hop  36.90  rej_spur   9.39  rej_bal  13.32  pts/hop  14.19
+bal+bg+mask c6   cfar  6.0 dB:  238.84 us/hop  hits/hop  13.89  rej_spur   1.30  rej_bal   9.52  pts/hop   3.07
+bal+bg+mask c9   cfar  9.0 dB:  236.22 us/hop  hits/hop   0.66  rej_spur   0.00  rej_bal   0.56  pts/hop   0.11
