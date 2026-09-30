@@ -547,19 +547,35 @@ export class VrfRenderer {
         this.used = Math.min(CAPACITY, this.used + n);
         this._fresh = Math.min(CAPACITY, this._fresh + n);
 
-        // Upload just the touched span (full upload on wrap, which is rare).
-        for (const attr of [this.aGrad, this.aAux, this.aQuat]) {
-            attr.needsUpdate = true;
-            if (!wrapped && attr.updateRanges !== undefined) {
-                attr.clearUpdateRanges();
-                attr.addUpdateRange(lo * attr.itemSize, n * attr.itemSize);
-            }
+        /* Several packets can land between two draws. three.js uploads every
+         * queued range and clears the list after the draw, so append here;
+         * clearing would drop all but the last packet. */
+        if (n >= CAPACITY) {
+            this._queueUpload(0, CAPACITY);
+        } else if (wrapped) {
+            this._queueUpload(lo, CAPACITY - lo);
+            this._queueUpload(0, j);
+        } else {
+            this._queueUpload(lo, n);
         }
         this.pointGeo.setDrawRange(0, this.used);
     }
 
+    _queueUpload(start, count) {
+        if (!count) return;
+        for (const attr of [this.aGrad, this.aAux, this.aQuat]) {
+            attr.needsUpdate = true;
+            const s = start * attr.itemSize, c = count * attr.itemSize;
+            const r = attr.updateRanges;
+            const last = r.length ? r[r.length - 1] : null;
+            if (last && last.start + last.count === s) last.count += c;
+            else attr.addUpdateRange(s, c);
+        }
+    }
+
     clearPoints() {
         for (let i = 0; i < CAPACITY; i++) this.aAux.setZ(i, -1e9);
+        this.aAux.clearUpdateRanges();
         this.aAux.needsUpdate = true;
         this.head = 0; this.used = 0; this._fresh = 0;
         this.pointGeo.setDrawRange(0, 0);
