@@ -97,7 +97,7 @@ int main(int argc, char **argv)
         ref_hop(ref, r[i].b, r[i].lo, vmax, topk, pr, &ro, &rt);
         hop_out_t no;
         hop_run(&hc, (const int8_t *)r[i].b, r[i].lo, vmax, topk,
-                keep_all, NULL, pn, &no);
+                keep_all, NULL, NULL, pn, &no);
         cmp_hops++;
         if (no.adc_peak != ro.adc_peak || no.adc_sumsq != ro.adc_sumsq ||
             no.ran != ro.ran || no.npts != ro.npts ||
@@ -167,7 +167,7 @@ int main(int argc, char **argv)
                 hop_out_t no;
                 uint64_t a = ns();
                 hop_run(&hc, (const int8_t *)r[i].b, r[i].lo, vmax, topk,
-                        keep_all, NULL, pn, &no);
+                        keep_all, NULL, NULL, pn, &no);
                 ntot += ns() - a;
             }
         printf(" %8.1f %6.2fx", ntot / h, (double)rtot / (double)ntot);

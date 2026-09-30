@@ -97,6 +97,18 @@ class Ws:
     def set(self, **kw):
         self.send_text(json.dumps({'type': 'set', **kw}))
 
+    def get_state(self, timeout=2.0):
+        """State is only pushed on changes; ask for it and skip frames."""
+        self.send_text(json.dumps({'type': 'get_state'}))
+        t_end = time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            op, pl, _ = self.recv()
+            if op == 1:
+                j = json.loads(pl)
+                if j.get('type') == 'state':
+                    return j
+        return None
+
 
 def proc_cpu(pid):
     """(process ticks, {tid: (comm, ticks)})"""
@@ -151,6 +163,12 @@ def main():
     ap.add_argument('--spectrum', type=int, default=0)
     ap.add_argument('--density', type=float, default=1.0)
     ap.add_argument('--gain', type=int, default=45)
+    ap.add_argument('--closure', type=float, default=None, help='rad, 0 = off')
+    ap.add_argument('--balance', type=float, default=None, help='dB, 0 = off')
+    ap.add_argument('--spur', type=int, default=None, help='fixed-spur mask 0/1')
+    ap.add_argument('--bg', type=int, default=None, help='receiver background norm 0/1')
+    ap.add_argument('--cfar', type=float, default=None, help='CFAR threshold dB')
+    ap.add_argument('--spm', type=float, default=None, help='spur margin')
     ap.add_argument('--settle', type=float, default=3.0)
     ap.add_argument('--secs', type=float, default=20.0)
     ap.add_argument('--pid', type=int, default=0)
@@ -158,8 +176,21 @@ def main():
     a = ap.parse_args()
 
     ws = Ws(a.host, a.port)
+    gates = {}
+    if a.closure is not None:
+        gates['closure_max'] = a.closure
+    if a.balance is not None:
+        gates['balance_db'] = a.balance
+    if a.spur is not None:
+        gates['spur_mask'] = a.spur
+    if a.bg is not None:
+        gates['bg_norm'] = a.bg
+    if a.cfar is not None:
+        gates['cfar_db'] = a.cfar
+    if a.spm is not None:
+        gates['spur_margin'] = a.spm
     ws.set(gain=a.gain, output_fraction=a.density, spectrum=a.spectrum,
-           **PLANS[a.plan])
+           **PLANS[a.plan], **gates)
 
     state0 = state1 = None
     t_end_settle = time.monotonic() + a.settle
@@ -170,6 +201,7 @@ def main():
             if j.get('type') == 'state':
                 state0 = j
 
+    state0 = ws.get_state() or state0
     cpu0 = proc_cpu(a.pid) if a.pid else None
     tis0 = time_in_state() if a.pid else None
     t0 = time.monotonic()
@@ -192,10 +224,6 @@ def main():
         wire += nb
         if op == 1:
             j = json.loads(pl)
-            if j.get('type') == 'state':
-                if state0 is None:
-                    state0 = j
-                state1 = j
             continue
         if op != 2 or len(pl) < HDR.size:
             continue
@@ -216,6 +244,7 @@ def main():
             n_spec_pkt += 1
         seq_prev = seq
     dt = time.monotonic() - t0
+    state1 = ws.get_state() or state1
     cpu1 = proc_cpu(a.pid) if a.pid else None
     tis1 = time_in_state() if a.pid else None
 
@@ -258,6 +287,17 @@ def main():
             'adc_rms': state1.get('adc_rms'),
             'state_points_last': state1.get('points'),
         })
+        if 'gates' in state1:
+            out.update({
+                'closure_max': state1.get('closure_max'),
+                'balance_db': state1.get('balance_db'),
+                'hits_s': round(d('hits', 'gates') / span_s, 1),
+                'rej_balance_s': round(d('rej_balance', 'gates') / span_s, 1),
+                'rej_closure_s': round(d('rej_closure', 'gates') / span_s, 1),
+                'rej_spur_s': round(d('rej_spur', 'gates') / span_s, 1),
+                'bg_norm': state1.get('bg_norm'),
+                'cfar_db': state1.get('cfar_db'),
+            })
     if cpu0 and cpu1:
         hz = os.sysconf('SC_CLK_TCK')
         out['cpu_pct_total'] = round(100.0 * (cpu1[0] - cpu0[0]) / hz / dt, 1)
