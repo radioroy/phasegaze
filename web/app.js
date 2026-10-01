@@ -1,9 +1,9 @@
 // app.js — hemisphere viewer + live CSI stream. Optional rear-camera AR
 // overlay (CAM); no IMU, so AR points are stamped in the device frame.
 
-import { Net } from './js/net.js?v=pg61';
-import { VrfRenderer } from './js/render.js?v=pg61';
-import { Ui } from './js/ui.js?v=pg61';
+import { Net } from './js/net.js?v=pg70';
+import { VrfRenderer } from './js/render.js?v=pg70';
+import { Ui } from './js/ui.js?v=pg70';
 
 const renderer = new VrfRenderer(document.getElementById('gl'));
 const net = new Net();
@@ -13,8 +13,8 @@ window.__ui = ui;
 
 let netFps = 0, ptsLast = 0;
 
-/* Points are raw CFAR hits. Hop IF EQ lives in Ui._fftEqV for the FFT
- * canvas; it must not run here. */
+/* Points are raw CFAR hits. The FFT canvas gets the background-removed
+ * fold from the server, with Ui._fftEqI on top; neither runs here. */
 net.onPoints = (header, f32) => {
     netFps = header.fps;
     ptsLast = header.count;

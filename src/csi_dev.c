@@ -198,6 +198,25 @@ int csi_dev_open(csi_dev_t *d, const char *path)
 
     ioctl(d->fd, CSI_IOC_JTAG_SETUP);
 
+    /* Hold the JTAG lease for the whole run. quadrf-gui polls
+     * `quadrf-jtag --status rx/tx` at 1 Hz while its page is open; each run
+     * holds the lease ~9 ms (~20 spans), so LO hops stall and the sweep
+     * breaks up. With the lease held here those polls time out after
+     * 100 ms instead. The driver drops it when the fd closes. */
+    {
+        uint64_t t0 = now_ns();
+        while (ioctl(d->fd, CSI_IOC_JTAG_ACQUIRE_LEASE) != 0) {
+            if (errno == EBUSY && now_ns() - t0 < 2000000000ull) {
+                usleep(1000);
+                continue;
+            }
+            if (errno != ENOTTY)
+                fprintf(stderr, "csi_dev: JTAG lease not acquired: %s\n",
+                        strerror(errno));
+            break;
+        }
+    }
+
     /* Analog MAX2851: mesh / --rx off leave E_RX as a single antenna and
      * MODE=standby. FPGA 0x25/0x27/0x6A do not turn those paths back on. */
     jtag_write(d, 0x43, (uint16_t)((6u << 10) | 0x3FFu)); /* Main6: all 4 RX */
@@ -243,7 +262,10 @@ int csi_dev_open(csi_dev_t *d, const char *path)
 void csi_dev_close(csi_dev_t *d)
 {
     if (d->ring && d->ring != MAP_FAILED) munmap(d->ring, d->map_len);
-    if (d->fd >= 0) close(d->fd);
+    if (d->fd >= 0) {
+        ioctl(d->fd, CSI_IOC_JTAG_RELEASE_LEASE);
+        close(d->fd);
+    }
     pthread_mutex_destroy(&d->jtag_mtx);
 }
 

@@ -28,6 +28,7 @@
 #define FS_MHZ           37.3726
 #define TOPK_BASE        512
 #define HOP_SPUR_LO_MAX  128      /* >= MAX_LO_STEPS */
+#define HOP_BG_GAINS     64       /* FPGA 0x6A gain 0..63 */
 
 typedef struct {
     /* Log power, fftshifted. Only [k_min, k_max] is written per hop. */
@@ -50,11 +51,17 @@ typedef struct {
     double         spur_lo[HOP_SPUR_LO_MAX];
     uint16_t       spur_visits[HOP_SPUR_LO_MAX];
     /* Receiver background: slow per-bin mean of vraw over the sweep,
-     * learned per worker. vn = vraw - bg is what CFAR sees. */
+     * learned per worker and kept per gain, so a gain change or a short
+     * plan picks up what an earlier long sweep learned. vn = vraw - bg
+     * is what CFAR sees. bg points into bg_bank[bg_gain]. */
     float         *bg;
     float         *vn;
-    int            bg_n;           /* hops averaged since the last reset */
+    int            bg_n;           /* hops averaged into bg */
     int            bg_gain;
+    float          bg_mean;        /* mean of bg over [k_min, k_max] */
+    float         *bg_bank[HOP_BG_GAINS];
+    int            bg_bank_n[HOP_BG_GAINS];
+    float          bg_bank_mean[HOP_BG_GAINS];
 } hop_ctx_t;
 
 /* Per-hit rejection gates, runtime so the UI can move them. 0 disables. */
@@ -94,6 +101,12 @@ typedef struct {
     uint32_t rej_balance;
     uint32_t rej_closure;
     uint32_t rej_spur;
+    /* Spectrum fold source over [k_min, k_max]: vn + fold_off when the
+     * background is warm (fold_norm = 1), else vraw. Notched bins are 0
+     * in vraw either way and should be skipped. */
+    const float *vfold;
+    float    fold_off;
+    int      fold_norm;
 } hop_out_t;
 
 typedef int (*hop_keep_fn)(double rf_mhz, const void *arg);

@@ -365,6 +365,7 @@ typedef struct {
     uint64_t adc_n;
     float    lo_start, lo_end;
     int      spectrum;
+    int      spec_raw;      /* hops folded without a warm background */
     double   slot_sum[PG_SPECTRUM_BINS];
     uint32_t slot_cnt[PG_SPECTRUM_BINS];
     uint8_t *frame;
@@ -418,7 +419,9 @@ static void frame_publish(frame_acc_t *a)
     server_publish(0, a->frame, sizeof(pg_hdr_t) + a->npts * sizeof(pg_point_t));
 
     if (a->spectrum) {
-        /* Raw log-power averages. Display AGC / video average live in the client. */
+        /* Log-power averages, receiver background removed per FFT bin when
+         * every hop had it warm (reserved bit 0). Display AGC / video
+         * average live in the client. */
         for (int s = 0; s < PG_SPECTRUM_BINS; ++s)
             g_spec_out[s] = a->slot_cnt[s] ? (float)(a->slot_sum[s] / a->slot_cnt[s]) : 0.0f;
         pg_hdr_t *sh = (pg_hdr_t *)g_sframe;
@@ -430,7 +433,7 @@ static void frame_publish(frame_acc_t *a)
         sh->lo_end = (float)HW_LO_MAX_MHZ;
         sh->fps = g_fps;
         sh->seq = g_seq++;
-        sh->reserved = 0;
+        sh->reserved = a->spec_raw ? 0u : 1u;
         memcpy(g_sframe + sizeof(pg_hdr_t), g_spec_out, sizeof(g_spec_out));
         server_publish(1, g_sframe, sizeof(g_sframe));
     }
@@ -551,8 +554,9 @@ static int claim_span(uint8_t *dst, span_tag_t *tag, frame_acc_t **acc, int spec
 
 static void frame_contribute(frame_acc_t *a, const pg_point_t *pts, uint32_t n,
                              float vmax_hop, int adc_peak, double adc_sumsq,
-                             uint32_t adc_n, const float *vraw, double lo,
-                             int k_min, int k_max)
+                             uint32_t adc_n, const float *vraw,
+                             const float *vfold, float fold_off, int fold_norm,
+                             double lo, int k_min, int k_max)
 {
     const int half = FFT_SIZE / 2;
     pthread_mutex_lock(&g_frame_mtx);
@@ -567,12 +571,16 @@ static void frame_contribute(frame_acc_t *a, const pg_point_t *pts, uint32_t n,
     a->adc_n += adc_n;
     if (a->spectrum && vraw) {
         /* Fold only the digital keep-band (±LO_STEP/2) so analog
-         * skirts do not pile up at the edges of a narrow sweep. */
+         * skirts do not pile up at the edges of a narrow sweep. DC and
+         * 40 MHz comb bins are notched to 0 in vraw; counting them would
+         * dent the slot they land in. */
+        if (!fold_norm) a->spec_raw++;
         for (int k = k_min; k <= k_max; ++k) {
+            if (vraw[k] <= 0.0f) continue;
             double rf = lo + FS_MHZ * ((double)k - (double)half) / (double)FFT_SIZE;
             int s = (int)((rf - HW_LO_MIN_MHZ) / PG_SPECTRUM_BIN_MHZ);
             if ((unsigned)s < PG_SPECTRUM_BINS) {
-                a->slot_sum[s] += vraw[k];
+                a->slot_sum[s] += vfold[k] + fold_off;
                 a->slot_cnt[s]++;
             }
         }
@@ -625,10 +633,12 @@ static void *worker(void *arg)
         }
         if (!o.ran)
             frame_contribute(acc, NULL, 0, 0.0f, o.adc_peak, o.adc_sumsq,
-                             BLOCK_BYTES, NULL, lo, w->hop.k_min, w->hop.k_max);
+                             BLOCK_BYTES, NULL, NULL, 0.0f, 0, lo,
+                             w->hop.k_min, w->hop.k_max);
         else
             frame_contribute(acc, w->pts, o.npts, o.vmax_hop, o.adc_peak,
-                             o.adc_sumsq, BLOCK_BYTES, w->hop.vraw, lo,
+                             o.adc_sumsq, BLOCK_BYTES, w->hop.vraw,
+                             o.vfold, o.fold_off, o.fold_norm, lo,
                              w->hop.k_min, w->hop.k_max);
     }
     return NULL;

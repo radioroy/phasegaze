@@ -15,24 +15,57 @@ const WIFI_COLOR = ['band', 'chan', 'full'];
 const WIFI_COLOR_LAB = { band: 'BAND', chan: 'CHAN', full: 'FULL' };
 /* Video-average time constants (s). Independent of sweep rate. */
 const FFT_TAU = { fast: 0.07, med: 0.28, slow: 0.90 };
-/* AGC attack / release (s). Attack follows a new peak; release holds the scale. */
-const FFT_AGC_ATK = 0.18;
-const FFT_AGC_REL = 1.10;
-/* Floor = live min. Pad puts that trough a little above the axis. */
+/* Y-axis AGC (s). p98, not the single hottest bin. Release is short
+ * because a shrunk plan must drop a peak that left the view. */
+const FFT_AGC_ATK = 0.10;
+const FFT_AGC_REL = 0.18;
+const FFT_FLOOR_ATK = 0.10;
+const FFT_FLOOR_REL = 0.40;
+/* Pad puts the floor a little above the axis. */
 const FFT_LO_PAD = 0.10;
 /* Keep Y from ranging into the hop scallop when the band is empty. */
 const FFT_Y_MIN_RATIO = 1.75;
-/* Analog RX is 20 MHz. Fold is ±10 MHz around each LO. Classify that
- * IF shape (p20 per offset) and subtract it from the FFT canvas only.
- * Hemisphere points stay on raw CFAR intensity — this mask does not
- * scale, gate, or recolor them. */
+/* Analog RX is 20 MHz, folded ±10 MHz around each LO. The per-hop
+ * residual is not one shape: skirt depth tracks the RF noise share of
+ * the floor, so edges dip ~0.15 ln at 4.9 GHz and hump ~0.15 at 6 GHz.
+ * Learned per LO as the per-offset median of (hop - hop median) over
+ * the hop and its ±FFT_EQ_WIN neighbours; an emitter that fills one or
+ * two hops is outvoted and keeps its shape. Across 5.5-5.8 GHz the
+ * ±8 MHz lines also alternate with LO mod 80 MHz (two hops on, two
+ * off), so hops at the same LO phase vote first when there are enough
+ * of them. The hop median (passband)
+ * is the zero, so the floor is never pulled down. Banked per gain and
+ * server-norm state; short plans and Wi-Fi hops read it interpolated
+ * in LO. FFT canvas only, hemisphere points stay on raw CFAR. */
 const FFT_HOP_MHZ = 20;
 const FFT_EQ_N = 20;
-const FFT_EQ_PCT = 0.20;
-const FFT_EQ_TAU = 0.40;
-/* One 20 MHz hop has one sample per IF offset — p20 is the spectrum
- * itself. Need ≥2 hops to classify the analog shape. */
-const FFT_EQ_MIN_HOPS = 2;
+const FFT_EQ_WIN = 3;
+const FFT_EQ_MIN_HOPS = 4;
+const FFT_EQ_FILL = 15;
+const FFT_EQ_TAU = 1.0;
+const FFT_EQ_LO0 = 4900;
+const FFT_EQ_LO_N = 1201;
+/* LO distance (MHz) a learned hop may be borrowed or interpolated over. */
+const FFT_EQ_REACH = 40;
+const FFT_EQ_PHASE = 80;
+const FFT_EQ_PHASE_WIN = 2;
+const FFT_EQ_PHASE_MIN = 3;
+/* On top of that, skirt and DC taps carry a fixed per-LO pattern
+ * (stable to ~0.02 ln over minutes, different hop to hop). Learned per
+ * LO only while the hop is quiet: level within FFT_EQ_QUIET_LVL of its
+ * neighbours and passband p90-p10 under FFT_EQ_QUIET_IQR. Passband
+ * taps never get a per-LO term, so a weak emitter there stays. */
+const FFT_EQ_DETAIL = [0, 1, 2, 8, 9, 10, 17, 18, 19];
+const FFT_EQ_PASS = [3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16];
+const FFT_EQ_QUIET_LVL = 0.10;
+const FFT_EQ_QUIET_IQR = 0.12;
+const FFT_EQ_DETAIL_TAU = 2.0;
+const FFT_EQ_DETAIL_CLIP = 0.40;
+/* Coherent level jump: median shift (ln) and the IQR under it.
+ * A gain step moves every bin together; a new emitter does not. */
+const FFT_SHIFT_MIN = 0.20;
+const FFT_SHIFT_IQR = 0.30;
+const FFT_MISS_HOLD = 6;
 const LS_KEY = 'phasegaze.settings.v8';
 const ACCENT_DEFAULT = '#b8c4b8';
 /* Camera mode hides the HUD this long after the last tap. */
@@ -122,13 +155,22 @@ export class Ui {
         this.spectrum = null;
         this._fftAvg = null;
         this._fftHold = null;
+        this._fftMiss = null;
         this._fftScale = 1e-6;
         this._fftLo = 0;
         this._fftScratch = [];
-        this._fftEq = new Float32Array(FFT_EQ_N);
-        this._fftEqMean = 0;
-        this._fftEqBkt = Array.from({ length: FFT_EQ_N }, () => []);
-        this._fftHops = 0;
+        this._fftDelta = [];
+        /* Per-gain IF deviation from that hop's own p20. 64 x 20. */
+        /* Per gain, x {raw, server-normalized} x {sweep, parked LO}.
+         * Each: LO x offset tables { s, n } plus per-LO detail { d, dn }, lazy. */
+        this._fftBanks = new Array(4 * (RF_GAIN_MAX + 1)).fill(null);
+        this._fftStatic = false;
+        this._fftHopMap = new Map();
+        this._fftHopList = [];
+        this._fftCorr = null;
+        this._fftCorrKey = -1;
+        this._fftSnapped = false;
+        this._fftSrvNorm = false;
         this._fftT = 0;
         this._fftDt = 0.03;
         this.state = null;
@@ -849,19 +891,36 @@ export class Ui {
         const a = 1 - Math.exp(-dt / tau);
         if (!this._fftAvg || this._fftAvg.length !== n) {
             this._fftAvg = Float32Array.from(f32);
+            this._fftMiss = new Uint16Array(n);
         } else {
             const avg = this._fftAvg;
+            const shift = this._fftCoherentShift(f32);
+            if (shift) {
+                for (let i = 0; i < n; i++) if (avg[i] > 1e-8) avg[i] += shift;
+                this._fftScale += shift;
+                if (this._fftLo > 0) this._fftLo += shift;
+                this._fftSnapped = true;
+            }
+            const miss = this._fftMiss;
             for (let i = 0; i < n; i++) {
-                if (f32[i] <= 1e-8) avg[i] = 0;
-                else avg[i] += a * (f32[i] - avg[i]);
+                const raw = f32[i];
+                if (raw <= 1e-8) {
+                    if (++miss[i] > FFT_MISS_HOLD) avg[i] = 0;
+                    continue;
+                }
+                miss[i] = 0;
+                /* First visit after a wider plan: don't slew up from 0. */
+                if (avg[i] <= 1e-8) avg[i] = raw;
+                else avg[i] += a * (raw - avg[i]);
             }
         }
         this.spectrum = this._fftAvg;
         this._specF0 = header.loStart;
         this._specF1 = header.loEnd;
+        this._fftSrvNorm = !!(header.sweeps & 1);
         if (!this.s.fftAgc && !this._fftHold)
             this._fftHold = this._fftAvg.slice();
-        this._updateFftEq(f32);
+        this._updateFftShape(this._fftAvg);
         this._updateFftScale();
         if ($('freq-pop').classList.contains('open') && this.s.fft)
             this._drawFft();
@@ -900,91 +959,337 @@ export class Ui {
         return i;
     }
 
-    /* FFT-canvas only. Do not use on ingest / sphere intensity. */
-    _fftEqV(v, f) {
-        if (this._fftHops < FFT_EQ_MIN_HOPS || this._fftEqMean <= 0) return v;
-        return v - (this._fftEq[this._fftHopIdx(f)] - this._fftEqMean);
+    /* Median of (raw-avg) when the move is the same on every filled bin. */
+    _fftCoherentShift(raw) {
+        const avg = this._fftAvg;
+        if (!avg || avg.length !== raw.length) return 0;
+        const d = this._fftDelta;
+        d.length = 0;
+        for (let i = 0; i < raw.length; i++) {
+            if (raw[i] > 1e-8 && avg[i] > 1e-8) d.push(raw[i] - avg[i]);
+        }
+        if (d.length < 40) return 0;
+        d.sort((x, y) => x - y);
+        const med = d[d.length >> 1];
+        const q1 = d[Math.floor(0.25 * (d.length - 1))];
+        const q3 = d[Math.floor(0.75 * (d.length - 1))];
+        if (Math.abs(med) < FFT_SHIFT_MIN || q3 - q1 > FFT_SHIFT_IQR) return 0;
+        return med;
     }
 
-    _updateFftEq(raw) {
-        if (!raw) return;
+    /* A parked LO has no retune settling in its span, so its skirts
+     * differ from the same LO inside a sweep (-0.06 vs -0.12 ln at
+     * 5745); it gets its own banks. */
+    _fftBank(g) {
+        const set = (this._fftSrvNorm ? 1 : 0) + (this._fftStatic ? 2 : 0);
+        return set * (RF_GAIN_MAX + 1) + g;
+    }
+
+    /* Offsets at `lo` from one bank: exact, else interpolated between
+     * learned LOs at the same 80 MHz phase, else linear between the
+     * nearest learned LOs within FFT_EQ_REACH. */
+    _fftBankAt(b, lo, out) {
+        const i = Math.round(lo) - FFT_EQ_LO0;
+        if (i < 0 || i >= FFT_EQ_LO_N) return false;
+        const s = b.s, n = b.n, N = FFT_EQ_N;
+        if (n[i]) {
+            for (let k = 0; k < N; k++) out[k] = s[i * N + k];
+            return true;
+        }
+        let il = -1, ih = -1;
+        for (let m = 1; m <= FFT_EQ_PHASE_WIN && (il < 0 || ih < 0); m++) {
+            const d = m * FFT_EQ_PHASE;
+            if (il < 0 && i - d >= 0 && n[i - d]) il = i - d;
+            if (ih < 0 && i + d < FFT_EQ_LO_N && n[i + d]) ih = i + d;
+        }
+        if (il >= 0 || ih >= 0) {
+            const j = il < 0 ? ih : ih < 0 ? il : -1;
+            if (j >= 0) {
+                for (let k = 0; k < N; k++) out[k] = s[j * N + k];
+            } else {
+                const w = (i - il) / (ih - il);
+                for (let k = 0; k < N; k++) out[k] = s[il * N + k] * (1 - w) + s[ih * N + k] * w;
+            }
+            return true;
+        }
+        for (let d = 1; d <= FFT_EQ_REACH && (il < 0 || ih < 0); d++) {
+            if (il < 0 && i - d >= 0 && n[i - d]) il = i - d;
+            if (ih < 0 && i + d < FFT_EQ_LO_N && n[i + d]) ih = i + d;
+        }
+        if (il < 0 && ih < 0) return false;
+        if (il < 0 || ih < 0) {
+            const j = il < 0 ? ih : il;
+            for (let k = 0; k < N; k++) out[k] = s[j * N + k];
+            return true;
+        }
+        const w = (i - il) / (ih - il);
+        for (let k = 0; k < N; k++) out[k] = s[il * N + k] * (1 - w) + s[ih * N + k] * w;
+        return true;
+    }
+
+    /* This gain's table, else the nearest gain within ±6 steps that has
+     * this LO. Offsets are relative to the hop median, so only shape
+     * carries across gains. Returns the gain used, or -1. */
+    _fftShapeAt(lo, out) {
+        const g = this.s.hwGain | 0;
+        if (g < 0 || g > RF_GAIN_MAX) return -1;
+        const banks = this._fftBanks;
+        for (let d = 0; d <= 6; d++) {
+            for (const gg of [g + d, g - d]) {
+                if (gg < 0 || gg > RF_GAIN_MAX || (d === 0 && gg !== g)) continue;
+                const b = banks[this._fftBank(gg)];
+                if (!b || !this._fftBankAt(b, lo, out)) continue;
+                this._fftDetailAt(b, lo, out);
+                return gg;
+            }
+        }
+        return -1;
+    }
+
+    _fftBankGet(bi) {
+        const N = FFT_EQ_N;
+        return this._fftBanks[bi] || (this._fftBanks[bi] = {
+            s: new Float32Array(FFT_EQ_LO_N * N), n: new Uint8Array(FFT_EQ_LO_N),
+            d: new Float32Array(FFT_EQ_LO_N * N), dn: new Uint8Array(FFT_EQ_LO_N),
+            lv: new Float32Array(FFT_EQ_LO_N) });
+    }
+
+    /* Parked LO: no neighbours to vote, so learn over time instead, and
+     * only while the hop sits at its own floor. A Wi-Fi channel that
+     * fills the whole hop has a flat passband too; its level gives it
+     * away. The floor tracker drops at once and creeps up 0.02 ln/s. */
+    _learnFftParked(h, g) {
+        const li = h.lo - FFT_EQ_LO0;
+        if (li < 0 || li >= FFT_EQ_LO_N) return;
+        const bank = this._fftBankGet(this._fftBank(g));
+        const dt = this._fftDt || 0.03;
+        if (!bank.lv[li] || h.med < bank.lv[li]) bank.lv[li] = h.med;
+        else bank.lv[li] += 0.02 * dt;
+        if (h.med - bank.lv[li] > FFT_EQ_QUIET_LVL) return;
+        const col = this._fftCol;
+        col.length = 0;
+        for (const k of FFT_EQ_PASS) if (h.rel[k] === h.rel[k]) col.push(h.rel[k]);
+        if (col.length < 8) return;
+        col.sort((x, y) => x - y);
+        if (col[Math.floor(0.9 * (col.length - 1))] - col[Math.floor(0.1 * (col.length - 1))] > FFT_EQ_QUIET_IQR)
+            return;
+        const a = 1 - Math.exp(-dt / FFT_EQ_DETAIL_TAU);
+        const seed = !bank.n[li];
+        for (const k of FFT_EQ_DETAIL) {
+            const x = h.rel[k];
+            if (x !== x) continue;
+            const p = li * FFT_EQ_N + k;
+            const r = Math.max(-FFT_EQ_DETAIL_CLIP, Math.min(FFT_EQ_DETAIL_CLIP, x));
+            bank.s[p] = seed ? r : bank.s[p] + a * (r - bank.s[p]);
+        }
+        if (bank.n[li] < 255) bank.n[li]++;
+    }
+
+    /* Per-LO skirt/DC term: exact LO only, it does not interpolate. */
+    _fftDetailAt(b, lo, out) {
+        const i = Math.round(lo) - FFT_EQ_LO0;
+        if (i < 0 || i >= FFT_EQ_LO_N || !b.dn[i]) return;
+        for (const k of FFT_EQ_DETAIL) out[k] += b.d[i * FFT_EQ_N + k];
+    }
+
+    /* FFT-canvas only. Do not use on ingest / sphere intensity. */
+    _fftEqI(v, i) {
+        const c = this._fftCorr;
+        return c && i < c.length ? v - c[i] : v;
+    }
+
+    _fftEqV(v, f) {
+        const n = this._fftAvg ? this._fftAvg.length : 0;
+        if (!n) return v;
+        const f0 = this._specF0 ?? HW_MIN, f1 = this._specF1 ?? HW_MAX;
+        return this._fftEqI(v, Math.round((f - f0) / ((f1 - f0) / n)));
+    }
+
+    _updateFftShape(src) {
+        const n = src ? src.length : 0;
+        if (!n) return;
+        const N = FFT_EQ_N;
+        if (!this._fftCorr || this._fftCorr.length !== n) {
+            this._fftCorr = new Float32Array(n);
+            this._fftBinHop = new Array(n);
+            this._fftBinTap = new Uint8Array(n);
+        }
+        const corr = this._fftCorr, binHop = this._fftBinHop, binTap = this._fftBinTap;
         const specF0 = this._specF0 ?? HW_MIN;
         const specF1 = this._specF1 ?? HW_MAX;
-        const n = raw.length;
-        if (!n) return;
         const bin = (specF1 - specF0) / n;
-        const bkt = this._fftEqBkt;
-        const hops = new Set();
-        for (let k = 0; k < FFT_EQ_N; k++) bkt[k].length = 0;
+        const map = this._fftHopMap;
+        if (map.size > 256) map.clear();
+        for (const h of map.values()) { h.cnt = 0; h.v.fill(NaN); }
         for (let i = 0; i < n; i++) {
-            const v = raw[i];
-            if (v <= 1e-8) continue;
             const f = specF0 + i * bin;
-            hops.add(Math.round(this._fftHopLo(f)));
-            bkt[this._fftHopIdx(f)].push(v);
-        }
-        this._fftHops = hops.size;
-        if (!this.s.fftAgc || this._fftHops < FFT_EQ_MIN_HOPS) return;
-        const dt = this._fftDt || 0.03;
-        const a = 1 - Math.exp(-dt / FFT_EQ_TAU);
-        const eq = this._fftEq;
-        let sum = 0, ntap = 0;
-        for (let k = 0; k < FFT_EQ_N; k++) {
-            const b = bkt[k];
-            if (!b.length) {
-                if (eq[k] > 0) { sum += eq[k]; ntap++; }
-                continue;
+            const lo = Math.round(this._fftHopLo(f));
+            let h = map.get(lo);
+            if (!h) {
+                h = { lo, cnt: 0, med: 0, has: false,
+                      v: new Float32Array(N).fill(NaN), rel: new Float32Array(N),
+                      shape: new Float32Array(N) };
+                map.set(lo, h);
             }
-            b.sort((x, y) => x - y);
-            const p = b[Math.min(b.length - 1, Math.floor(b.length * FFT_EQ_PCT))];
-            if (eq[k] <= 0) eq[k] = p;
-            else eq[k] += a * (p - eq[k]);
-            sum += eq[k];
-            ntap++;
+            const k = this._fftHopIdx(f);
+            binHop[i] = h;
+            binTap[i] = k;
+            const v = src[i];
+            if (v > 1e-8) {
+                if (h.v[k] !== h.v[k]) h.cnt++;
+                h.v[k] = v;
+            }
         }
-        this._fftEqMean = ntap ? sum / ntap : 0;
+        const list = this._fftHopList;
+        list.length = 0;
+        const col = this._fftCol || (this._fftCol = []);
+        for (const h of map.values()) {
+            if (h.cnt < FFT_EQ_FILL) continue;
+            col.length = 0;
+            for (let k = 0; k < N; k++) if (h.v[k] === h.v[k]) col.push(h.v[k]);
+            col.sort((x, y) => x - y);
+            h.med = col[col.length >> 1];
+            for (let k = 0; k < N; k++) h.rel[k] = h.v[k] - h.med;
+            list.push(h);
+        }
+        list.sort((x, y) => x.lo - y.lo);
+        this._fftStatic = list.length === 1;
+
+        const g = this.s.hwGain | 0;
+        const learn = this.s.fftAgc && g >= 0 && g <= RF_GAIN_MAX;
+        if (learn && this._fftStatic) this._learnFftParked(list[0], g);
+        if (learn && list.length >= FFT_EQ_MIN_HOPS) {
+            const bank = this._fftBankGet(this._fftBank(g));
+            const dt = this._fftDt || 0.03;
+            const a = 1 - Math.exp(-dt / FFT_EQ_TAU);
+            const ad = 1 - Math.exp(-dt / FFT_EQ_DETAIL_TAU);
+            const reach = FFT_EQ_WIN * FFT_HOP_MHZ;
+            const preach = FFT_EQ_PHASE_WIN * FFT_EQ_PHASE;
+            const vot = this._fftVot || (this._fftVot = []);
+            let j0 = 0, j1 = 0, p0 = 0, p1 = 0;
+            for (let i = 0; i < list.length; i++) {
+                const h = list[i];
+                const li = h.lo - FFT_EQ_LO0;
+                while (h.lo - list[j0].lo > reach) j0++;
+                if (j1 < i) j1 = i;
+                while (j1 + 1 < list.length && list[j1 + 1].lo - h.lo <= reach) j1++;
+                while (h.lo - list[p0].lo > preach) p0++;
+                if (p1 < i) p1 = i;
+                while (p1 + 1 < list.length && list[p1 + 1].lo - h.lo <= preach) p1++;
+                if (li < 0 || li >= FFT_EQ_LO_N) continue;
+                vot.length = 0;
+                for (let j = p0; j <= p1; j++)
+                    if ((list[j].lo - h.lo) % FFT_EQ_PHASE === 0) vot.push(list[j]);
+                let need = FFT_EQ_PHASE_MIN;
+                if (vot.length < need) {
+                    vot.length = 0;
+                    for (let j = j0; j <= j1; j++) vot.push(list[j]);
+                    need = FFT_EQ_MIN_HOPS;
+                    if (vot.length < need) continue;
+                }
+                const seed = !bank.n[li];
+                let touched = 0;
+                for (let k = 0; k < N; k++) {
+                    col.length = 0;
+                    for (let j = 0; j < vot.length; j++) {
+                        const x = vot[j].rel[k];
+                        if (x === x) col.push(x);
+                    }
+                    if (col.length < need) continue;
+                    col.sort((x, y) => x - y);
+                    const m = col.length >> 1;
+                    const est = col.length & 1 ? col[m] : 0.5 * (col[m - 1] + col[m]);
+                    const p = li * N + k;
+                    bank.s[p] = seed ? est : bank.s[p] + a * (est - bank.s[p]);
+                    touched++;
+                }
+                if (!touched) continue;
+                if (bank.n[li] < 255) bank.n[li]++;
+
+                col.length = 0;
+                for (let j = j0; j <= j1; j++) if (j !== i) col.push(list[j].med);
+                if (col.length < 2) continue;
+                col.sort((x, y) => x - y);
+                if (h.med - col[col.length >> 1] > FFT_EQ_QUIET_LVL) continue;
+                col.length = 0;
+                for (const k of FFT_EQ_PASS) if (h.rel[k] === h.rel[k]) col.push(h.rel[k]);
+                if (col.length < 8) continue;
+                col.sort((x, y) => x - y);
+                const spread = col[Math.floor(0.9 * (col.length - 1))] - col[Math.floor(0.1 * (col.length - 1))];
+                if (spread > FFT_EQ_QUIET_IQR) continue;
+                bank.lv[li] = bank.lv[li] ? bank.lv[li] + ad * (h.med - bank.lv[li]) : h.med;
+                const dseed = !bank.dn[li];
+                for (const k of FFT_EQ_DETAIL) {
+                    const x = h.rel[k];
+                    if (x !== x) continue;
+                    const p = li * N + k;
+                    const r = Math.max(-FFT_EQ_DETAIL_CLIP, Math.min(FFT_EQ_DETAIL_CLIP, x - bank.s[p]));
+                    bank.d[p] = dseed ? r : bank.d[p] + ad * (r - bank.d[p]);
+                }
+                if (bank.dn[li] < 255) bank.dn[li]++;
+            }
+        }
+
+        let key = -1;
+        for (const h of map.values()) {
+            const gu = h.cnt > 0 ? this._fftShapeAt(h.lo, h.shape) : -1;
+            h.has = gu >= 0;
+            if (h.has && key < 0) key = this._fftBank(gu);
+        }
+        for (let i = 0; i < n; i++) {
+            const h = binHop[i];
+            corr[i] = h.has ? h.shape[binTap[i]] : 0;
+        }
+        this._fftCorrStep = key !== this._fftCorrKey;
+        this._fftCorrKey = key;
     }
 
-    _fftLiveVals(src) {
+    _fftPcts(src) {
         const { i0, i1, specF0, bin } = this._fftView();
         const wifi = this._freqTab === 'wifi';
         const a1 = WIFI_SCAN_BANDS[0][1], b0 = WIFI_SCAN_BANDS[1][0];
         const out = this._fftScratch;
         out.length = 0;
-        let mx = 1e-6, mn = Infinity;
         for (let i = i0; i < i1; i++) {
             const raw = src[i];
             if (raw <= 1e-8) continue;
             const f = specF0 + i * bin;
             if (wifi && f >= a1 && f < b0) continue;
-            const v = this._fftEqV(raw, f);
-            out.push(v);
-            if (v > mx) mx = v;
-            if (v < mn) mn = v;
+            out.push(this._fftEqI(raw, i));
         }
-        return { mx, mn: Number.isFinite(mn) ? mn : mx, n: out.length };
+        if (out.length < 8) return { p10: 0, p98: 0, n: out.length };
+        out.sort((x, y) => x - y);
+        return {
+            p10: out[Math.floor(0.10 * (out.length - 1))],
+            p98: out[Math.floor(0.98 * (out.length - 1))],
+            n: out.length,
+        };
     }
 
     _updateFftScale() {
         if (!this._fftAvg) return;
-        const { mx, mn } = this._fftLiveVals(this._fftAvg);
-        const lo = mn;
-        if (this._fftScale <= 1e-6) this._fftScale = mx;
-        if (this._fftLo <= 0) this._fftLo = lo;
+        const shapeStep = !!this._fftCorrStep;
+        this._fftCorrStep = false;
+        const { p10, p98, n } = this._fftPcts(this._fftAvg);
+        if (n < 8) return;
+        if (this._fftScale <= 1e-6) this._fftScale = p98;
+        if (this._fftLo <= 0) this._fftLo = p10;
+        const snap = !this.s.fftAgc ? false : (this._fftSnapped || shapeStep);
+        this._fftSnapped = false;
         if (!this.s.fftAgc) return;
-        if (this._fftHops < FFT_EQ_MIN_HOPS) {
-            this._fftScale = mx;
-            this._fftLo = lo;
-            if (this._fftLo > this._fftScale * 0.95)
-                this._fftLo = this._fftScale * 0.95;
+        if (snap) {
+            this._fftScale = p98;
+            this._fftLo = Math.min(p10, p98 - 0.05);
             return;
         }
         const dt = this._fftDt || 0.03;
-        const pk = 1 - Math.exp(-dt / (mx > this._fftScale ? FFT_AGC_ATK : FFT_AGC_REL));
-        this._fftScale += pk * (mx - this._fftScale);
-        this._fftLo = lo;
-        if (this._fftLo > this._fftScale * 0.95)
-            this._fftLo = this._fftScale * 0.95;
+        const atk = 1 - Math.exp(-dt / FFT_AGC_ATK);
+        const rel = 1 - Math.exp(-dt / FFT_AGC_REL);
+        this._fftScale += (p98 > this._fftScale ? atk : rel) * (p98 - this._fftScale);
+        const flo = 1 - Math.exp(-dt / (p10 > this._fftLo ? FFT_FLOOR_ATK : FFT_FLOOR_REL));
+        this._fftLo += flo * (p10 - this._fftLo);
+        if (this._fftLo > this._fftScale - 0.05)
+            this._fftLo = this._fftScale - 0.05;
     }
 
     _drawFft() {
@@ -1000,9 +1305,7 @@ export class Ui {
         if (!src || !src.length) return;
         const { view0, view1, specF0, bin, i0, i1 } = this._fftView();
         const lo = this._fftLo > 0 ? this._fftLo : 0;
-        const hi = this._fftHops < FFT_EQ_MIN_HOPS
-            ? Math.max(this._fftScale, 1e-6)
-            : Math.max(this._fftScale, lo * FFT_Y_MIN_RATIO, 1e-6);
+        const hi = Math.max(this._fftScale, lo * FFT_Y_MIN_RATIO, 1e-6);
         const base = lo * (1 - FFT_LO_PAD);
         const span = Math.max(hi - base, 1e-6);
         const wifi = this._freqTab === 'wifi';
@@ -1030,7 +1333,7 @@ export class Ui {
             if (raw <= 0) continue;
             const bf0 = specF0 + i * bin;
             if (wifi && bf0 >= a1 && bf0 < b0) continue;
-            const v = this._fftEqV(raw, bf0);
+            const v = this._fftEqI(raw, i);
             const vh = Math.min(1, Math.max(0, (v - base) / span));
             if (vh <= 0) continue;
             const x0 = wifi ? this._wifiToX(bf0) * w : ((bf0 - view0) / (view1 - view0)) * w;

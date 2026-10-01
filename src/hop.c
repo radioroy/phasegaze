@@ -80,10 +80,16 @@ int hop_init(hop_ctx_t *h)
     h->spur_plan = 0;
     h->spur_nlo = 0;
     h->spur_margin = SPUR_PER_VISIT;
+    for (int g = 0; g < HOP_BG_GAINS; ++g) {
+        h->bg_bank[g] = NULL;
+        h->bg_bank_n[g] = 0;
+        h->bg_bank_mean[g] = 0.0f;
+    }
     h->bg = calloc(FFT_SIZE, sizeof(float));
     h->vn = calloc(FFT_SIZE, sizeof(float));
     h->bg_n = 0;
     h->bg_gain = -1;
+    h->bg_mean = 0.0f;
     if (!h->vraw || !h->topk || !h->spur_cnt || !h->spur_st || !h->bg || !h->vn)
         return -1;
     /* FFTW planning is not thread-safe; plan here, execute in the workers.
@@ -111,7 +117,13 @@ void hop_free(hop_ctx_t *h)
         if (h->fin[c]) fftwf_free(h->fin[c]);
     }
     free(h->vn);
-    free(h->bg);
+    /* h->bg is either the bootstrap buffer or one of the bank entries. */
+    int bg_banked = 0;
+    for (int g = 0; g < HOP_BG_GAINS; ++g) {
+        if (h->bg_bank[g] == h->bg) bg_banked = 1;
+        free(h->bg_bank[g]);
+    }
+    if (!bg_banked) free(h->bg);
     free(h->spur_st);
     free(h->spur_cnt);
     free(h->topk);
@@ -168,18 +180,25 @@ static const float *bg_apply(hop_ctx_t *h, int learn)
     const int k0 = h->k_min, k1 = h->k_max;
     const int warm = h->bg_n >= BG_WARM_HOPS;
     if (learn && h->bg_n == 0) {
-        for (int k = k0; k <= k1; ++k)
+        float sum = 0.0f;
+        for (int k = k0; k <= k1; ++k) {
             bg[k] = v[k];
+            sum += v[k];
+        }
+        h->bg_mean = sum / (float)(k1 - k0 + 1);
     } else if (learn) {
         const float a = h->bg_n < BG_TAU_HOPS ? 1.0f / (float)(h->bg_n + 1)
                                               : 1.0f / (float)BG_TAU_HOPS;
+        float sum = 0.0f;
         /* One pass: vn uses bg from before this hop. */
         for (int k = k0; k <= k1; ++k) {
             float x = v[k], d = x - bg[k];
             float on = x > 0.0f ? 1.0f : 0.0f;
             vn[k] = on * d;
             bg[k] += on * a * fminf(fmaxf(d, -BG_CLIP), BG_CLIP);
+            sum += bg[k];
         }
+        h->bg_mean = sum / (float)(k1 - k0 + 1);
     } else if (warm) {
         for (int k = k0; k <= k1; ++k)
             vn[k] = v[k] > 0.0f ? v[k] - bg[k] : 0.0f;
@@ -187,6 +206,30 @@ static const float *bg_apply(hop_ctx_t *h, int learn)
     if (learn)
         h->bg_n++;
     return warm ? vn : v;
+}
+
+/* Park the current background under its gain and bring up the one for
+ * `gain`. A gain that was never learned starts from bg_n = 0. */
+static void bg_select(hop_ctx_t *h, int gain)
+{
+    if (gain < 0) gain = 0;
+    if (gain >= HOP_BG_GAINS) gain = HOP_BG_GAINS - 1;
+    if (gain == h->bg_gain) return;
+    if (!h->bg_bank[gain]) {
+        h->bg_bank[gain] = calloc(FFT_SIZE, sizeof(float));
+        if (!h->bg_bank[gain])
+            return;
+    }
+    if (h->bg_gain >= 0 && h->bg_gain < HOP_BG_GAINS) {
+        h->bg_bank_n[h->bg_gain] = h->bg_n;
+        h->bg_bank_mean[h->bg_gain] = h->bg_mean;
+    } else {
+        free(h->bg);
+    }
+    h->bg = h->bg_bank[gain];
+    h->bg_n = h->bg_bank_n[gain];
+    h->bg_mean = h->bg_bank_mean[gain];
+    h->bg_gain = gain;
 }
 
 static void spur_reset(hop_ctx_t *h, int plan)
@@ -220,6 +263,9 @@ void hop_run(hop_ctx_t *h, const int8_t *blk, double lo, float vmax, int topk,
     o->npts = 0;
     o->vmax_hop = 1e-9f;
     o->hits = o->rej_balance = o->rej_closure = o->rej_spur = 0;
+    o->vfold = h->vraw;
+    o->fold_off = 0.0f;
+    o->fold_norm = 0;
     o->ran = peak >= ADC_PEAK_MIN;
     if (!o->ran)
         return;
@@ -255,13 +301,17 @@ void hop_run(hop_ctx_t *h, const int8_t *blk, double lo, float vmax, int topk,
     const int plan_los = gates ? gates->plan_los : 0;
     const float *cv = h->vraw;
     if (gates && gates->bg_norm) {
-        if (gates->gain != h->bg_gain) {
-            h->bg_gain = gates->gain;
-            h->bg_n = 0;
-        }
+        bg_select(h, gates->gain);
         /* A short plan parks emitters on fixed bins; keep what was learned
          * on the last long sweep at this gain and stop updating it. */
         cv = bg_apply(h, plan_los >= SPUR_PLAN_MIN);
+        if (cv == h->vn) {
+            /* Floor sits at the band-average background, so a gain step
+             * still moves the whole trace together. */
+            o->vfold = h->vn;
+            o->fold_off = h->bg_mean;
+            o->fold_norm = 1;
+        }
     }
 
     const float cfar_thresh = gates && gates->cfar_thresh > 0.0f
