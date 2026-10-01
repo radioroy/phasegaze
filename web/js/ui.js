@@ -70,7 +70,7 @@ const FFT_EQ_DETAIL_CLIP = 0.40;
 const FFT_SHIFT_MIN = 0.20;
 const FFT_SHIFT_IQR = 0.30;
 const FFT_MISS_HOLD = 6;
-const LS_KEY = 'phasegaze.settings.v8';
+const LS_KEY = 'phasegaze.settings.v9';
 const ACCENT_DEFAULT = '#b8c4b8';
 /* Camera mode hides the HUD this long after the last tap. */
 const CAM_HIDE_MS = 8000;
@@ -79,9 +79,9 @@ const DEFAULTS = {
     size: 15, gain: 4.0, decay: 1, density: 100,
     balanceDb: 10, closureDeg: 0, bgNorm: true, cfarDb: 7,
     pulse: false, flip: false,
-    mirrors: true, bottom: false, tiles: true, rings: true,
+    mirrors: true, bottom: false, tiles: true, rings: false,
     scheme: 'spectrum', targetLut: 'iron', targetFreq: 5500, targetWidth: 40,
-    freqPin: true, wifiColor: 'band',
+    freqPin: true, wifiColor: 'band', freqTab: 'range',
     fft: true, fftSpeed: 'fast', fftAgc: true,
     hwGain: 45,
     manualLo: HW_MIN, manualHi: HW_MAX,
@@ -149,7 +149,8 @@ export class Ui {
         if (typeof this.s.fftAgc !== 'boolean') this.s.fftAgc = true;
         if (typeof this.s.freqPin !== 'boolean') this.s.freqPin = true;
         if (typeof this.s.mirrors !== 'boolean') this.s.mirrors = true;
-        if (typeof this.s.rings !== 'boolean') this.s.rings = this.s.tiles !== false;
+        if (typeof this.s.rings !== 'boolean') this.s.rings = false;
+        if (this.s.freqTab !== 'wifi') this.s.freqTab = 'range';
         if (!WIFI_COLOR.includes(this.s.wifiColor))
             this.s.wifiColor = this.s.wifiChan === true ? 'chan' : 'band';
         delete this.s.wifiChan;
@@ -187,7 +188,7 @@ export class Ui {
         this.pts = 0;
         this._gainSendTimer = 0;
         this._rangeSendTimer = 0;
-        this._freqTab = 'range';
+        this._freqTab = this.s.freqTab;
 
         this.camMode = false;
         this.calOn = false;
@@ -208,7 +209,7 @@ export class Ui {
         this._bindCal();
         this._bindCamFade();
         this._applyAll();
-        this._syncModeUi();
+        this._setCamMode(true);
         this._resize();
         window.addEventListener('resize', () => this._resize());
         if (window.visualViewport)
@@ -219,6 +220,12 @@ export class Ui {
         try {
             const cur = localStorage.getItem(LS_KEY);
             if (cur) return JSON.parse(cur) || {};
+            const v8 = localStorage.getItem('phasegaze.settings.v8');
+            if (v8) {
+                const prev = JSON.parse(v8) || {};
+                prev.rings = false;
+                return prev;
+            }
             const v7 = localStorage.getItem('phasegaze.settings.v7');
             if (v7) {
                 const prev = JSON.parse(v7) || {};
@@ -238,7 +245,7 @@ export class Ui {
                 const prev = JSON.parse(v3) || {};
                 prev.mirrors = true;
                 if (typeof prev.rings !== 'boolean')
-                    prev.rings = prev.tiles !== false;
+                    prev.rings = false;
                 return prev;
             }
             const v2 = localStorage.getItem('phasegaze.settings.v2');
@@ -302,6 +309,7 @@ export class Ui {
         this.net.set({ gain: this.s.hwGain, output_fraction: this.s.density / 100,
             spectrum: this.s.fft ? 1 : 0, ...this._gateMsg() });
         if (this.s.scheme === 'target') this._applyTargetSweep(true);
+        else if (this._freqTab === 'wifi') this._commitWifiSel();
         else this._applyManualRange(true);
     }
 
@@ -335,7 +343,7 @@ export class Ui {
         $('btn-view').onclick = () => {
             const next = this.renderer.sphereCam === 'orbit' ? 'inside' : 'orbit';
             this.renderer.setSphereCam(next);
-            $('btn-view').textContent = (next === 'orbit' ? 'inside' : 'orbit').toUpperCase();
+            this._syncViewBtn();
         };
         $('btn-reset-view').onclick = () => this.renderer.resetView();
 
@@ -401,7 +409,9 @@ export class Ui {
     _syncModeUi() {
         const cam = this.camMode;
         const show = (id, vis) => { $(id).style.display = vis ? '' : 'none'; };
-        $('btn-cam').classList.toggle('on', cam);
+        $('btn-cam').textContent = cam ? 'SPHERE' : 'CAM';
+        $('btn-cam').classList.remove('on');
+        this._syncViewBtn();
         show('btn-cal', cam);
         show('btn-mirror', !cam);
         show('btn-view', !cam);
@@ -414,6 +424,11 @@ export class Ui {
                           't-bottom', 't-tiles', 't-rings'])
             show(id, !cam);
         $('btn-flip').classList.toggle('on', !!this.s.flip);
+    }
+
+    _syncViewBtn() {
+        const inside = this.renderer.sphereCam === 'inside';
+        $('btn-view').textContent = (inside ? 'outside' : 'inside').toUpperCase();
     }
 
     _bindCamFade() {
@@ -528,7 +543,7 @@ export class Ui {
         this._closeSet();
         $('freq-pop').classList.add('open');
         $('btn-freq').classList.add('on');
-        if (this._selectFreqTab) this._selectFreqTab('range', false);
+        if (this._selectFreqTab) this._selectFreqTab(this._freqTab, false);
         this._layoutHudPops();
         this._placeFft();
         this._setHint(false);
@@ -751,6 +766,7 @@ export class Ui {
         const selectTab = (tid, apply) => {
             const prev = this._freqTab;
             this._freqTab = tid;
+            this.s.freqTab = tid;
             $('ftab-range').classList.toggle('on', tid === 'range');
             $('ftab-wifi').classList.toggle('on', tid === 'wifi');
             $('freq-range').style.display = tid === 'range' ? '' : 'none';
@@ -766,8 +782,8 @@ export class Ui {
             this._placeFft();
             this._layoutHudPops();
         };
-        $('ftab-range').onclick = () => selectTab('range');
-        $('ftab-wifi').onclick = () => selectTab('wifi');
+        $('ftab-range').onclick = () => { selectTab('range'); this.save(); };
+        $('ftab-wifi').onclick = () => { selectTab('wifi'); this.save(); };
         this._selectFreqTab = selectTab;
         $('btn-fft').onclick = (e) => {
             e.stopPropagation();
@@ -796,7 +812,7 @@ export class Ui {
         };
         this._bindWifiPaint(inner);
         this._restoreWifiTiles();
-        selectTab('range', false);
+        selectTab(this._freqTab, false);
         this._placeFft();
     }
 
@@ -1843,6 +1859,7 @@ export class Ui {
         this._applyAll();
         this._syncSchemeUi();
         this._restoreWifiTiles();
+        if (this._selectFreqTab) this._selectFreqTab(this.s.freqTab, false);
         if (this._layoutManual) this._layoutManual();
         this._layoutGain();
         this._placeFft();

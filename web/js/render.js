@@ -464,7 +464,7 @@ export class VrfRenderer {
             uScaleFactorHigh: { value: SF_PER_MHZ * 6100 },
             uOpacity: { value: 0 },
             uShowTiles: { value: 1 },
-            uShowRings: { value: 1 },
+            uShowRings: { value: 0 },
             uShowBottom: { value: 0 },
             uLut: { value: this.pointUniforms.uLut.value },
             uFreqT: { value: this._chanTex },

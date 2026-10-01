@@ -80,13 +80,13 @@ export class Cam {
         } else if (name === 'NotAllowedError' || name === 'SecurityError') {
             title = 'CAMERA DENIED';
             msg = `Allow camera for ${location.host} in this browser's site ` +
-                  'settings, then tap CAM again.';
+                  'settings, then tap SPHERE and CAM.';
         } else if (name === 'NotFoundError') {
             title = 'NO CAMERA';
             msg = 'No usable camera on this device.';
         } else if (name === 'NotReadableError') {
             title = 'CAMERA BUSY';
-            msg = 'Another app holds the camera. Close it and tap CAM again.';
+            msg = 'Another app holds the camera. Close it, tap SPHERE, then CAM.';
         }
 
         $('cam-note-title').textContent = title;
