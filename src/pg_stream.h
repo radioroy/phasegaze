@@ -28,7 +28,8 @@ typedef struct __attribute__((packed)) {
     uint32_t seq;
     uint32_t reserved;   /* point frame: sweeps folded into this packet;
                           * spectrum frame: bit0 = receiver background
-                          * removed on every hop */
+                          * removed on every hop, bits 1.. = first LO
+                          * of the plan in 0.1 MHz */
 } pg_hdr_t;
 
 /* Direction-cosine point. (u, v) on the unit disk; client derives

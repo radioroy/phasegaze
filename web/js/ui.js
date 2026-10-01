@@ -15,10 +15,14 @@ const WIFI_COLOR = ['band', 'chan', 'full'];
 const WIFI_COLOR_LAB = { band: 'BAND', chan: 'CHAN', full: 'FULL' };
 /* Video-average time constants (s). Independent of sweep rate. */
 const FFT_TAU = { fast: 0.07, med: 0.28, slow: 0.90 };
-/* Y-axis AGC (s). p98, not the single hottest bin. Release is short
- * because a shrunk plan must drop a peak that left the view. */
-const FFT_AGC_ATK = 0.10;
-const FFT_AGC_REL = 0.18;
+/* Y-axis AGC (s). p98, not the single hottest bin. Release is long so
+ * Wi-Fi bursts do not pump the scale; a plan change snaps instead. */
+const FFT_AGC_ATK = 0.18;
+const FFT_AGC_REL = 1.10;
+/* After the plan or the slider stops moving: snap the Y scale, then
+ * let the hop EQ learn again (stale-plan frames are not learned). */
+const FFT_PLAN_SNAP_MS = 300;
+const FFT_PLAN_LEARN_MS = 400;
 const FFT_FLOOR_ATK = 0.10;
 const FFT_FLOOR_REL = 0.40;
 /* Pad puts the floor a little above the axis. */
@@ -165,6 +169,10 @@ export class Ui {
          * Each: LO x offset tables { s, n } plus per-LO detail { d, dn }, lazy. */
         this._fftBanks = new Array(4 * (RF_GAIN_MAX + 1)).fill(null);
         this._fftStatic = false;
+        this._fftPlanLo0 = 0;
+        this._fftUiSig = '';
+        this._fftPlanT = 0;
+        this._fftPlanPending = false;
         this._fftHopMap = new Map();
         this._fftHopList = [];
         this._fftCorr = null;
@@ -918,6 +926,18 @@ export class Ui {
         this._specF0 = header.loStart;
         this._specF1 = header.loEnd;
         this._fftSrvNorm = !!(header.sweeps & 1);
+        const lo0 = (header.sweeps >>> 1) / 10;
+        const uiSig = `${this._freqTab}|${this.s.manualLo}|${this.s.manualHi}|${(this.s.wifiSel || []).join(',')}`;
+        if (lo0 !== this._fftPlanLo0 || uiSig !== this._fftUiSig) {
+            this._fftPlanLo0 = lo0;
+            this._fftUiSig = uiSig;
+            this._fftPlanT = now;
+            this._fftPlanPending = true;
+        }
+        if (this._fftPlanPending && now - this._fftPlanT > FFT_PLAN_SNAP_MS) {
+            this._fftPlanPending = false;
+            this._fftSnapped = true;
+        }
         if (!this.s.fftAgc && !this._fftHold)
             this._fftHold = this._fftAvg.slice();
         this._updateFftShape(this._fftAvg);
@@ -945,7 +965,7 @@ export class Ui {
             else if (f < 5732.5) start = 5490;
             else start = 5735;
         } else {
-            start = this.s.manualLo;
+            start = this._fftPlanLo0 > 0 ? this._fftPlanLo0 - FFT_HOP_MHZ / 2 : this.s.manualLo;
         }
         const lo0 = start + FFT_HOP_MHZ / 2;
         return lo0 + FFT_HOP_MHZ * Math.round((f - lo0) / FFT_HOP_MHZ);
@@ -1156,7 +1176,8 @@ export class Ui {
         this._fftStatic = list.length === 1;
 
         const g = this.s.hwGain | 0;
-        const learn = this.s.fftAgc && g >= 0 && g <= RF_GAIN_MAX;
+        const settled = !this._fftPlanT || performance.now() - this._fftPlanT > FFT_PLAN_LEARN_MS;
+        const learn = settled && this.s.fftAgc && g >= 0 && g <= RF_GAIN_MAX;
         if (learn && this._fftStatic) this._learnFftParked(list[0], g);
         if (learn && list.length >= FFT_EQ_MIN_HOPS) {
             const bank = this._fftBankGet(this._fftBank(g));

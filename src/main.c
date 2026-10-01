@@ -433,7 +433,11 @@ static void frame_publish(frame_acc_t *a)
         sh->lo_end = (float)HW_LO_MAX_MHZ;
         sh->fps = g_fps;
         sh->seq = g_seq++;
-        sh->reserved = a->spec_raw ? 0u : 1u;
+        /* Bits 1..: first LO of this frame's plan in 0.1 MHz, so the
+         * client lays the 20 MHz hop grid on the plan the data came
+         * from, not on a slider that is already somewhere else. */
+        sh->reserved = (a->spec_raw ? 0u : 1u)
+                     | ((uint32_t)lroundf((a->lo_start + 0.5f * (float)LO_STEP_MHZ) * 10.0f) << 1);
         memcpy(g_sframe + sizeof(pg_hdr_t), g_spec_out, sizeof(g_spec_out));
         server_publish(1, g_sframe, sizeof(g_sframe));
     }
