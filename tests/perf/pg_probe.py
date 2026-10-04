@@ -23,7 +23,7 @@ PG_MAGIC = 0x315A4750
 HDR = struct.Struct('<IHHIfffII')
 
 PLANS = {
-    'full':   {'lo_start': 4900, 'lo_end': 6100, 'bands': []},
+    'full':   {'lo_start': 4480, 'lo_end': 6740, 'bands': []},
     # ch 36, 100, 149: three separated 20 MHz hops
     'wifi3':  {'lo_start': 5170, 'lo_end': 5895,
                'bands': [[5170, 5190], [5490, 5510], [5735, 5755]]},

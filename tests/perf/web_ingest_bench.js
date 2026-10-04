@@ -8,7 +8,7 @@
 window.pgIngestBench = async function ({ liveSecs = 8, plan = null, synthReps = 200 } = {}) {
     const r = window.__renderer, ui = window.__ui;
     const PLANS = {
-        full:   { lo_start: 4900, lo_end: 6100, bands: [] },
+        full:   { lo_start: 4480, lo_end: 6740, bands: [] },
         single: { lo_start: 5170, lo_end: 5895, bands: [[5735, 5755]] },
     };
     if (plan) {
