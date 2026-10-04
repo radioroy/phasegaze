@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <errno.h>
 #include <signal.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -33,13 +34,26 @@
 
 #define DEVICE_PATH      "/dev/csi_stream0"
 
-#define HW_LO_MIN_MHZ    4900.0
-#define HW_LO_MAX_MHZ    6100.0
+/* Measured on quadrf.local, MAX2851 die rev 1. The lock pin is high from
+ * 4440 to 6755 MHz and drops at 4430 and 6760 (VAS zone 0 / 7, VCO
+ * sub-bands 0 and 63). Hop centers sit 10 MHz in from these edges:
+ * 4490 is still in the acquisition zone, 6730 is on the top sub-band
+ * with the pin high and the 40 MHz comb on the programmed offset.
+ * Gain 0..63 does not pull the zone out. A per-board measure can
+ * tighten this when the lock pin falls inside the span. The hop center
+ * stays 10 MHz in from the pin-high edge, on this same 20 MHz grid. */
+#define HW_LO_MIN_MHZ    4480.0
+#define HW_LO_MAX_MHZ    6740.0
+/* Beside the VCO seeds. The service runs as dietpi and /var/lib/quadrf
+ * is root-owned, so creating a file there returns EACCES. */
+#define LOCK_PATH        "/var/lib/quadrf/demos/phasegaze-lock.txt"
+#define TUNER_CPU        1
 #define RF_GAIN_MAX      63
 
 #define MAX_LO_STEPS     128
 #define MAX_FRAME_POINTS 16384
-#define MAX_BANDS        32
+/* Every other 20 MHz Wi-Fi channel is its own band: 34 with 6 GHz in. */
+#define MAX_BANDS        48
 
 /* Off: real emitters indoors close anywhere in +-pi (multipath, uncalibrated
  * per-RX phase), and 1.02 rad (the old DOA_COST_MAX 0.35) dropped 50-73% of
@@ -98,6 +112,13 @@ static struct {
 
 static csi_dev_t g_dev;
 static volatile sig_atomic_t g_quit = 0;
+/* Sweep ceiling. A config edit or a lock measure sets it, and either
+ * one stays inside 4480–6740. Spectrum bins stay on the full span. */
+static double g_hw_lo = HW_LO_MIN_MHZ;
+static double g_hw_hi = HW_LO_MAX_MHZ;
+static int g_lock_lo, g_lock_hi;
+static volatile int g_lock_busy;
+static int g_lock_err;
 static volatile float g_fps = 0.0f;
 static volatile uint32_t g_last_points = 0;
 static volatile int g_adc_peak = 0;
@@ -106,6 +127,10 @@ static volatile float g_adc_rms = 0.0f;
 static void on_sig(int sig) { (void)sig; g_quit = 1; }
 
 static void push_plan_locked(void);
+static void lock_cal_start(void);
+static void lock_save(void);
+static int sweep_limit_apply(double lo, double hi);
+static void clamp_sweep_to_hw(void);
 
 static inline uint64_t now_ns(void)
 {
@@ -183,11 +208,11 @@ static int on_control(const char *msg, size_t len, void *user)
         }
         int sweep_changed = 0;
         if (mg_json_get_num(json, "$.lo_start", &d)) {
-            g_set.lo_start = fmax(HW_LO_MIN_MHZ, fmin(HW_LO_MAX_MHZ, d));
+            g_set.lo_start = fmax(g_hw_lo, fmin(g_hw_hi, d));
             sweep_changed = 1;
         }
         if (mg_json_get_num(json, "$.lo_end", &d)) {
-            g_set.lo_end = fmax(HW_LO_MIN_MHZ, fmin(HW_LO_MAX_MHZ, d));
+            g_set.lo_end = fmax(g_hw_lo, fmin(g_hw_hi, d));
             sweep_changed = 1;
         }
         int off, blen;
@@ -213,14 +238,44 @@ static int on_control(const char *msg, size_t len, void *user)
                 g_set.lo_start = g_set.lo_end;
                 g_set.lo_end = t;
             }
-            g_set.epoch++;
-            push_plan_locked();
+            /* The measure thread owns the tuner until it restarts it. */
+            if (!g_lock_busy)
+                push_plan_locked();
             changed = 1;
+        }
+        {
+            double req_lo = g_hw_lo, req_hi = g_hw_hi;
+            int lim = 0;
+            if (mg_json_get_num(json, "$.hw_min", &d)) { req_lo = d; lim = 1; }
+            if (mg_json_get_num(json, "$.hw_max", &d)) { req_hi = d; lim = 1; }
+            /* Ignored while the measure thread owns the synthesizer.
+             * A rejected pair still broadcasts, so the boxes snap back. */
+            if (lim && !g_lock_busy && sweep_limit_apply(req_lo, req_hi)) {
+                clamp_sweep_to_hw();
+                lock_save();
+                push_plan_locked();
+                fprintf(stderr, "phasegaze: sweep %.0f..%.0f\n",
+                        g_hw_lo, g_hw_hi);
+            }
+            if (lim)
+                changed = 1;
         }
         pthread_mutex_unlock(&g_set.mtx);
         /* JTAG from this thread would land between retunes at random. */
         if (apply_gain >= 0)
             tuner_set_gain(apply_gain);
+    } else if (strcmp(type, "lock_cal") == 0) {
+        int start = 0;
+        pthread_mutex_lock(&g_set.mtx);
+        if (!g_lock_busy) {
+            g_lock_busy = 1;
+            g_lock_err = 0;
+            start = 1;
+            changed = 1;
+        }
+        pthread_mutex_unlock(&g_set.mtx);
+        if (start)
+            lock_cal_start();
     }
     free(type);
     return changed;
@@ -240,6 +295,7 @@ static void state_json(char *buf, size_t cap, void *user)
     int n = snprintf(buf, cap,
         "{\"type\":\"state\",\"lo_start\":%.1f,\"lo_end\":%.1f,"
         "\"hw_min\":%.1f,\"hw_max\":%.1f,\"lo_step\":%.1f,"
+        "\"lock_lo\":%d,\"lock_hi\":%d,\"lock_busy\":%d,\"lock_err\":%d,"
         "\"gain\":%d,\"output_fraction\":%.3f,"
         "\"closure_max\":%.3f,\"balance_db\":%.1f,\"spur_mask\":%d,"
         "\"bg_norm\":%d,\"cfar_db\":%.2f,\"spur_margin\":%.2f,"
@@ -253,7 +309,8 @@ static void state_json(char *buf, size_t cap, void *user)
         "\"dsp\":{\"hops\":%llu,\"invalid\":%llu,\"dup\":%llu,\"untagged\":%llu,"
         "\"dropped\":%llu,\"frames\":%llu},\"bands\":[",
         g_set.lo_start, g_set.lo_end,
-        HW_LO_MIN_MHZ, HW_LO_MAX_MHZ, LO_STEP_MHZ,
+        g_hw_lo, g_hw_hi, LO_STEP_MHZ,
+        g_lock_lo, g_lock_hi, g_lock_busy, g_lock_err,
         g_set.gain, g_set.output_fraction,
         (double)g_set.closure_max, (double)g_set.balance_db, g_set.spur_mask,
         g_set.bg_norm, (double)g_set.cfar_db, (double)g_set.spur_margin,
@@ -292,15 +349,50 @@ static int keep_rf(double rf_mhz, const void *arg)
     return freq_in_bands((const settings_t *)arg, rf_mhz);
 }
 
-/* One LO at the center of each 20 MHz slice. RANGE and WIFI share this
- * so 5490–5730 and UNII-2C 80s (106/122/138) hop the same grid. */
+/* One LO at the center of each 20 MHz slice of [a, b]. WIFI passes its
+ * band edges (5170, 5490, 5735, 5945) so those centers stay on the
+ * channel grid. The range slider snaps to the hardware slices first. */
 static void plan_add_span(sweep_plan_t *p, double a, double b)
 {
     if (b < a) { double t = a; a = b; b = t; }
+    /* Center sits 10 MHz inside the board edge, so a hop on the last
+     * slice is still where the lock pin was high. */
+    double lo_min = g_hw_lo + 0.5 * LO_STEP_MHZ;
+    double lo_max = g_hw_hi - 0.5 * LO_STEP_MHZ;
     for (double lo = a + 0.5 * LO_STEP_MHZ;
          lo + 0.5 * LO_STEP_MHZ <= b + 1e-6 && p->n < MAX_LO_STEPS;
-         lo += LO_STEP_MHZ)
+         lo += LO_STEP_MHZ) {
+        if (lo < lo_min - 1e-6 || lo > lo_max + 1e-6)
+            continue;
         p->lo[p->n++] = lo;
+    }
+}
+
+/* Range thumbs are continuous MHz. Starting the hop list at lo_start+10
+ * slides every center by 1 MHz per slider step: the ±10 MHz keep-bands
+ * walk across the 1 MHz spectrum slots, and each new center is a VCO
+ * learn on the tuner thread. Expand to the slices anchored at
+ * HW_LO_MIN (4480, 4500, ...) so the interior hops stay put. */
+static void snap_hw_slices(double *a, double *b)
+{
+    const double step = LO_STEP_MHZ;
+    const double org = HW_LO_MIN_MHZ;
+    double a0 = org + step * floor((*a - org) / step + 1e-6);
+    double b1 = org + step * ceil((*b - org) / step - 1e-6);
+    if (b1 <= a0)
+        b1 = a0 + step;
+    if (a0 < g_hw_lo)
+        a0 = org + step * ceil((g_hw_lo - org) / step - 1e-9);
+    if (b1 > g_hw_hi)
+        b1 = org + step * floor((g_hw_hi - org) / step + 1e-9);
+    if (a0 < HW_LO_MIN_MHZ)
+        a0 = HW_LO_MIN_MHZ;
+    if (b1 > HW_LO_MAX_MHZ)
+        b1 = HW_LO_MAX_MHZ;
+    if (b1 <= a0)
+        b1 = g_hw_hi;
+    *a = a0;
+    *b = b1;
 }
 
 static void build_plan(sweep_plan_t *p, const settings_t *s)
@@ -313,13 +405,15 @@ static void build_plan(sweep_plan_t *p, const settings_t *s)
         if (p->n == 0)
             p->lo[p->n++] = 0.5 * (s->bands[0][0] + s->bands[0][1]);
     } else {
-        plan_add_span(p, s->lo_start, s->lo_end);
+        double a = s->lo_start, b = s->lo_end;
+        snap_hw_slices(&a, &b);
+        plan_add_span(p, a, b);
         if (p->n == 0)
-            p->lo[p->n++] = 0.5 * (s->lo_start + s->lo_end);
+            p->lo[p->n++] = 0.5 * (a + b);
     }
 
     /* Point-frame header / shell scale use the keep-band, not the WIFI
-     * catalog 5170–5895 the client sends with a channel subset. */
+     * catalog 5170–6725 the client sends with a channel subset. */
     if (p->n > 0) {
         p->lo_start = (float)(p->lo[0] - 0.5 * LO_STEP_MHZ);
         p->lo_end = (float)(p->lo[p->n - 1] + 0.5 * LO_STEP_MHZ);
@@ -329,13 +423,166 @@ static void build_plan(sweep_plan_t *p, const settings_t *s)
     }
 }
 
+static sweep_plan_t g_plan;
+static int g_plan_set;
+
+static int plan_same(const sweep_plan_t *a, const sweep_plan_t *b)
+{
+    if (a->n != b->n)
+        return 0;
+    for (int i = 0; i < a->n; i++)
+        if (fabs(a->lo[i] - b->lo[i]) > 0.05)
+            return 0;
+    return 1;
+}
+
 static void push_plan_locked(void)
 {
     sweep_plan_t p;
     build_plan(&p, &g_set);
+    /* Thumb drags send a new range every 80 ms. Same hop list: keep the
+     * tuner on its envelope. A retune resync blanks the spectrum. */
+    if (g_plan_set && plan_same(&g_plan, &p))
+        return;
+    g_plan = p;
+    g_plan_set = 1;
+    g_set.epoch++;
     fprintf(stderr, "phasegaze: plan %d hop%s lo0=%.1f\n",
             p.n, p.n == 1 ? "" : "s", p.n ? p.lo[0] : 0.0);
     tuner_set_plan(&p);
+}
+
+/* Inward onto the 20 MHz grid, inside 4480–6740. A reversed pair is
+ * swapped. Returns 0, leaving the ceiling alone, when it collapses
+ * below one slice. */
+static int sweep_limit_apply(double lo, double hi)
+{
+    const double step = LO_STEP_MHZ;
+    const double org = HW_LO_MIN_MHZ;
+    if (hi < lo) {
+        double t = lo;
+        lo = hi;
+        hi = t;
+    }
+    if (lo < HW_LO_MIN_MHZ) lo = HW_LO_MIN_MHZ;
+    if (hi > HW_LO_MAX_MHZ) hi = HW_LO_MAX_MHZ;
+    lo = org + step * ceil((lo - org) / step - 1e-9);
+    hi = org + step * floor((hi - org) / step + 1e-9);
+    if (lo < HW_LO_MIN_MHZ) lo = HW_LO_MIN_MHZ;
+    if (hi > HW_LO_MAX_MHZ) hi = HW_LO_MAX_MHZ;
+    if (hi < lo + step)
+        return 0;
+    g_hw_lo = lo;
+    g_hw_hi = hi;
+    return 1;
+}
+
+static void clamp_sweep_to_hw(void)
+{
+    if (g_set.lo_start < g_hw_lo) g_set.lo_start = g_hw_lo;
+    if (g_set.lo_end > g_hw_hi) g_set.lo_end = g_hw_hi;
+    if (g_set.lo_end < g_set.lo_start) {
+        g_set.lo_start = g_hw_lo;
+        g_set.lo_end = g_hw_hi;
+    }
+}
+
+/* Pin-high edge, then the 20 MHz slice whose center is still 10 MHz
+ * inside that edge. Never wider than the 4480–6740 span. */
+static void hw_from_lock(int lock_lo, int lock_hi)
+{
+    if (!(lock_hi > lock_lo && lock_lo > 0)) {
+        g_hw_lo = HW_LO_MIN_MHZ;
+        g_hw_hi = HW_LO_MAX_MHZ;
+        return;
+    }
+    double need_lo = lock_lo < HW_LO_MIN_MHZ ? HW_LO_MIN_MHZ : (double)lock_lo;
+    double need_hi = lock_hi > HW_LO_MAX_MHZ ? HW_LO_MAX_MHZ : (double)lock_hi;
+    if (!sweep_limit_apply(need_lo, need_hi)) {
+        g_hw_lo = HW_LO_MIN_MHZ;
+        g_hw_hi = HW_LO_MAX_MHZ;
+    }
+}
+
+static void lock_load(void)
+{
+    FILE *f = fopen(LOCK_PATH, "r");
+    if (!f)
+        return;
+    /* Line two is the sweep ceiling, when a config edit has saved one.
+     * An older file is just the pin pair, and the ceiling is derived. */
+    int pin_lo = 0, pin_hi = 0, swo = 0, shi = 0;
+    int n = fscanf(f, "%d %d %d %d", &pin_lo, &pin_hi, &swo, &shi);
+    fclose(f);
+    if (n >= 2 && pin_hi > pin_lo && pin_lo > 4000 && pin_hi < 8000) {
+        g_lock_lo = pin_lo;
+        g_lock_hi = pin_hi;
+    }
+    if (n == 4 && shi > swo) {
+        if (!sweep_limit_apply((double)swo, (double)shi) && g_lock_hi > g_lock_lo)
+            hw_from_lock(g_lock_lo, g_lock_hi);
+    } else if (g_lock_hi > g_lock_lo) {
+        hw_from_lock(g_lock_lo, g_lock_hi);
+    }
+    if (g_lock_hi > g_lock_lo || n == 4)
+        fprintf(stderr, "phasegaze: lock pin %d..%d MHz, sweep %.0f..%.0f\n",
+                g_lock_lo, g_lock_hi, g_hw_lo, g_hw_hi);
+}
+
+static void lock_save(void)
+{
+    FILE *f = fopen(LOCK_PATH, "w");
+    if (!f) {
+        fprintf(stderr, "phasegaze: lock file: %s\n", strerror(errno));
+        return;
+    }
+    fprintf(f, "%d %d\n%.0f %.0f\n", g_lock_lo, g_lock_hi, g_hw_lo, g_hw_hi);
+    fclose(f);
+}
+
+static void *lock_cal_main(void *arg)
+{
+    (void)arg;
+    tuner_stop();
+    int lo = 0, hi = 0;
+    int rc = csi_dev_measure_lock(&g_dev, &lo, &hi);
+    pthread_mutex_lock(&g_set.mtx);
+    if (rc == 0) {
+        g_lock_lo = lo;
+        g_lock_hi = hi;
+        g_lock_err = 0;
+        hw_from_lock(lo, hi);
+        clamp_sweep_to_hw();
+        lock_save();
+        fprintf(stderr, "phasegaze: lock pin %d..%d MHz, sweep %.0f..%.0f\n",
+                lo, hi, g_hw_lo, g_hw_hi);
+        push_plan_locked();
+    } else {
+        g_lock_err = 1;
+        fprintf(stderr, "phasegaze: lock measure failed\n");
+    }
+    sweep_plan_t plan = g_plan;
+    pthread_mutex_unlock(&g_set.mtx);
+    if (!g_quit)
+        tuner_start(&g_dev, TUNER_CPU, &plan);
+    pthread_mutex_lock(&g_set.mtx);
+    g_lock_busy = 0;
+    pthread_mutex_unlock(&g_set.mtx);
+    server_broadcast_state();
+    return NULL;
+}
+
+static void lock_cal_start(void)
+{
+    pthread_t th;
+    if (pthread_create(&th, NULL, lock_cal_main, NULL) != 0) {
+        pthread_mutex_lock(&g_set.mtx);
+        g_lock_busy = 0;
+        g_lock_err = 1;
+        pthread_mutex_unlock(&g_set.mtx);
+        return;
+    }
+    pthread_detach(th);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +592,6 @@ static void push_plan_locked(void)
 // ---------------------------------------------------------------------------
 
 #define N_WORKERS          2
-#define TUNER_CPU          1
 /* Publication arrives in bursts of several spans when the csi-copy kworker
  * is delayed. The workers have about 1 span/span of spare capacity, so a
  * 7 ms backlog drains within a few ms; beyond that they are really behind.
@@ -686,6 +932,8 @@ int main(int argc, char **argv)
 
     if (csi_dev_open(&g_dev, DEVICE_PATH) != 0)
         return 1;
+    lock_load();
+    clamp_sweep_to_hw();
     csi_dev_set_gain(&g_dev, g_set.gain);
     csi_dev_probe_analog_gain(&g_dev);
 
@@ -711,6 +959,8 @@ int main(int argc, char **argv)
     sweep_plan_t plan;
     pthread_mutex_lock(&g_set.mtx);
     build_plan(&plan, &g_set);
+    g_plan = plan;
+    g_plan_set = 1;
     pthread_mutex_unlock(&g_set.mtx);
     if (tuner_start(&g_dev, TUNER_CPU, &plan) != 0) {
         fprintf(stderr, "tuner start failed\n");
@@ -748,6 +998,10 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < N_WORKERS; ++i)
         pthread_join(wk[i].th, NULL);
+    /* The measure thread stops and restarts the tuner. Wait it out so
+     * this join is the only one. */
+    for (int i = 0; i < 2000 && g_lock_busy; i++)
+        usleep(10000);
     tuner_stop();
     server_stop();
     for (int i = 0; i < N_WORKERS; ++i)

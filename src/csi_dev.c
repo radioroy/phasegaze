@@ -618,6 +618,122 @@ static int program_auto(csi_dev_t *d, double mhz, int from_current, uint8_t seed
     return jtag_batch(d, regs, 5);
 }
 
+/* DOUT mux on lock detect. 0xFFFF is what quadrf-jtag calls LOCKED.
+ * Zone 0/7 is the same edge, but the pin is the pass/fail. */
+static int lock_pin(csi_dev_t *d)
+{
+    if (jtag_write(d, MAX2851_SPI, (uint16_t)((14u << 10) | 0x160u)) != 0)
+        return -1;
+    uint16_t v = 0;
+    if (jtag_read(d, MAX2851_SPI, &v) != 0)
+        return -1;
+    return v == 0xFFFFu;
+}
+
+/* From the current sub-band. Holds the band when VTUNE lands in 1..6 so
+ * the pin read is not taken mid-search. A zone 0/7 result is left as-is
+ * and the pin comes back low. */
+static int vas_pin(csi_dev_t *d, int mhz, int *pin)
+{
+    uint8_t band = 0, adc = 0;
+    if (program_auto(d, mhz, 1, 0) != 0)
+        return -1;
+    for (int i = 0; i < 8; i++) {
+        usleep(i ? 400 : 1200);
+        if (read_vco(d, &band, &adc) != 0)
+            return -1;
+        if (adc >= 1 && adc <= 6) {
+            if (jtag_write(d, MAX2851_SPI,
+                           (uint16_t)((19u << 10) | (band & 0x3Fu))) != 0)
+                return -1;
+            break;
+        }
+    }
+    usleep(300);
+    int p = lock_pin(d);
+    if (p < 0)
+        return -1;
+    *pin = p;
+    return 0;
+}
+
+static int walk_pin(csi_dev_t *d, int a, int b, int step, int *lo, int *hi)
+{
+    *lo = -1;
+    *hi = -1;
+    if (step == 0)
+        return -1;
+    for (int mhz = a; step > 0 ? mhz <= b : mhz >= b; mhz += step) {
+        int pin = 0;
+        if (vas_pin(d, mhz, &pin) != 0)
+            return -1;
+        if (!pin)
+            continue;
+        if (*lo < 0 || mhz < *lo)
+            *lo = mhz;
+        if (mhz > *hi)
+            *hi = mhz;
+    }
+    return 0;
+}
+
+/* 1 MHz, both directions. *lo is the higher of the two bottoms, *hi the
+ * lower of the two tops, so a 1 MHz hysteresis does not count as locked. */
+static int edge_both(csi_dev_t *d, int center, int span, int *lo, int *hi)
+{
+    int up_lo, up_hi, dn_lo, dn_hi;
+    int a = center - span, b = center + span;
+    if (walk_pin(d, a, b, 1, &up_lo, &up_hi) != 0)
+        return -1;
+    if (walk_pin(d, b, a, -1, &dn_lo, &dn_hi) != 0)
+        return -1;
+    if (up_lo < 0 || dn_lo < 0 || up_hi < 0 || dn_hi < 0)
+        return -1;
+    *lo = up_lo > dn_lo ? up_lo : dn_lo;
+    *hi = up_hi < dn_hi ? up_hi : dn_hi;
+    return 0;
+}
+
+int csi_dev_measure_lock(csi_dev_t *d, int *lo_mhz, int *hi_mhz)
+{
+    int dn_lo, dn_hi, up_lo, up_hi, ign;
+    /* Down from mid first so the upward sweep starts on a nearby sub-band
+     * instead of a 1 GHz jump into the unlock. */
+    if (vas_pin(d, 5500, &ign) != 0)
+        return -1;
+    if (walk_pin(d, 5495, 4300, -5, &dn_lo, &dn_hi) != 0)
+        return -1;
+    (void)dn_hi;
+    if (walk_pin(d, 4300, 6900, 5, &up_lo, &up_hi) != 0)
+        return -1;
+    if (dn_lo < 0 || up_lo < 0 || up_hi < 0)
+        return -1;
+    int coarse_lo = dn_lo > up_lo ? dn_lo : up_lo;
+    int coarse_hi = up_hi;
+    if (coarse_hi - coarse_lo < 100)
+        return -1;
+
+    int fine_lo, fine_hi_edge, fine_lo_edge, fine_hi;
+    if (edge_both(d, coarse_lo, 12, &fine_lo, &fine_hi_edge) != 0)
+        return -1;
+    /* Track up in 20 MHz steps. A single VAS from the bottom to 6.7 GHz
+     * does not finish inside the eight readbacks. */
+    if (walk_pin(d, fine_lo + 20, coarse_hi - 12, 20, &ign, &ign) != 0)
+        return -1;
+    if (edge_both(d, coarse_hi, 12, &fine_lo_edge, &fine_hi) != 0)
+        return -1;
+    if (fine_hi <= fine_lo)
+        return -1;
+    *lo_mhz = fine_lo;
+    *hi_mhz = fine_hi;
+
+    vas_pin(d, 5500, &ign);
+    d->last_lo_mhz = 0;
+    if (d->last_gain >= 0)
+        csi_dev_set_gain(d, d->last_gain);
+    return 0;
+}
+
 /* Automatic VAS, then hold the band it found. Not used on the hop loop. */
 static int vco_learn(csi_dev_t *d, double mhz, int from_current, uint8_t seed)
 {

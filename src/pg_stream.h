@@ -42,6 +42,6 @@ typedef struct __attribute__((packed)) {
 } pg_point_t;
 
 #define PG_SPECTRUM_BIN_MHZ  1.0f
-#define PG_SPECTRUM_BINS     1200  /* (6100 - 4900) / 1 */
+#define PG_SPECTRUM_BINS     2260  /* (6740 - 4480) / 1 */
 
 #endif /* PG_STREAM_H */

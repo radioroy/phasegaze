@@ -69,4 +69,9 @@ int  csi_dev_get_gain(csi_dev_t *d);
 /* SPI-read MAX2851 Main1 (LNA+VGA). Invasive; call after user gain changes. */
 int  csi_dev_probe_analog_gain(csi_dev_t *d);
 
+/* Walk the LO down and up. *lo_mhz and *hi_mhz are the last frequencies
+ * where the lock pin is high in both directions. The tuner must be stopped;
+ * this holds the synthesizer for several seconds. Parks at 5500 MHz after. */
+int  csi_dev_measure_lock(csi_dev_t *d, int *lo_mhz, int *hi_mhz);
+
 #endif /* CSI_DEV_H */
