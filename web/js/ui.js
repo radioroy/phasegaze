@@ -1,13 +1,13 @@
 // ui.js — FREQ / COLOR / CONF panels, gain slider, fps line.
 
-import { WIFI_TIERS, WIFI_F0, WIFI_F1, WIFI_SCAN_BANDS, WIFI_HOP_BANDS, WIFI_GAP } from './wifi.js';
+import { WIFI_TIERS, WIFI_VIEWS, WIFI_F0, WIFI_F1, WIFI_HOP_BANDS, WIFI_GAP } from './wifi.js?v=pg75';
 import { SCHEMES, schemeCss, lutRgb } from './colors.js';
 import { Cam } from './cam.js';
 import { applyDrag, defaultCorners, sanitizeCorners, unmapPoint } from './cal.js';
 
 const TARGET_LUTS = ['spectrum', 'iron', 'whitehot', 'greenhot', 'viridis'];
 
-const HW_MIN = 4900, HW_MAX = 6100;
+const HW_MIN = 4480, HW_MAX = 6740;
 const RF_GAIN_MAX = 63;
 const FFT_SPEEDS = ['fast', 'med', 'slow'];
 const FFT_SPEED_LAB = { fast: 'FAST', med: 'MED', slow: 'SLOW' };
@@ -47,8 +47,8 @@ const FFT_EQ_WIN = 3;
 const FFT_EQ_MIN_HOPS = 4;
 const FFT_EQ_FILL = 15;
 const FFT_EQ_TAU = 1.0;
-const FFT_EQ_LO0 = 4900;
-const FFT_EQ_LO_N = 1201;
+const FFT_EQ_LO0 = 4480;
+const FFT_EQ_LO_N = 2261;
 /* LO distance (MHz) a learned hop may be borrowed or interpolated over. */
 const FFT_EQ_REACH = 40;
 const FFT_EQ_PHASE = 80;
@@ -70,7 +70,7 @@ const FFT_EQ_DETAIL_CLIP = 0.40;
 const FFT_SHIFT_MIN = 0.20;
 const FFT_SHIFT_IQR = 0.30;
 const FFT_MISS_HOLD = 6;
-const LS_KEY = 'phasegaze.settings.v9';
+const LS_KEY = 'phasegaze.settings.v10';
 const ACCENT_DEFAULT = '#b8c4b8';
 /* Camera mode hides the HUD this long after the last tap. */
 const CAM_HIDE_MS = 8000;
@@ -85,7 +85,7 @@ const DEFAULTS = {
     fft: true, fftSpeed: 'fast', fftAgc: true,
     hwGain: 45,
     manualLo: HW_MIN, manualHi: HW_MAX,
-    wifiSel: [],
+    wifiSel: [], wifiView: '5',
     accent: ACCENT_DEFAULT,
     corners: defaultCorners(),
 };
@@ -155,6 +155,7 @@ export class Ui {
             this.s.wifiColor = this.s.wifiChan === true ? 'chan' : 'band';
         delete this.s.wifiChan;
         this.s.wifiSel = sanitizeWifiSel(this.s.wifiSel);
+        if (!WIFI_VIEWS.some(v => v.id === this.s.wifiView)) this.s.wifiView = '5';
         this.s.corners = sanitizeCorners(this.s.corners);
 
         this.spectrum = null;
@@ -183,12 +184,16 @@ export class Ui {
         this._fftT = 0;
         this._fftDt = 0.03;
         this.state = null;
+        this._sweepEdit = false;
+        this.boardLo = HW_MIN;
+        this.boardHi = HW_MAX;
         this.netFps = 0;
         this.gpuFps = 0;
         this.pts = 0;
         this._gainSendTimer = 0;
         this._rangeSendTimer = 0;
         this._freqTab = this.s.freqTab;
+        this._wifiView = this.s.wifiView;
 
         this.camMode = false;
         this.calOn = false;
@@ -217,28 +222,37 @@ export class Ui {
     }
 
     _load() {
+        /* Saved 4900–6100 was the old hardware limit, not a chosen sub-band. */
+        const widen = (prev) => {
+            if (!prev) return prev;
+            if (prev.manualLo == null || prev.manualLo <= 4900) prev.manualLo = HW_MIN;
+            if (prev.manualHi == null || prev.manualHi >= 6100) prev.manualHi = HW_MAX;
+            return prev;
+        };
         try {
             const cur = localStorage.getItem(LS_KEY);
             if (cur) return JSON.parse(cur) || {};
+            const v9 = localStorage.getItem('phasegaze.settings.v9');
+            if (v9) return widen(JSON.parse(v9) || {});
             const v8 = localStorage.getItem('phasegaze.settings.v8');
             if (v8) {
                 const prev = JSON.parse(v8) || {};
                 prev.rings = false;
-                return prev;
+                return widen(prev);
             }
             const v7 = localStorage.getItem('phasegaze.settings.v7');
             if (v7) {
                 const prev = JSON.parse(v7) || {};
                 /* v7 slider 0 was the 0.05 s default. 0 is now one frame. */
                 if (prev.decay === 0) prev.decay = 1;
-                return prev;
+                return widen(prev);
             }
             const v6 = localStorage.getItem('phasegaze.settings.v6');
             if (v6) {
                 const prev = JSON.parse(v6) || {};
                 /* 23 was the v6 default (~0.20 s). 0 was 0.05 s. */
                 if (prev.decay === 23 || prev.decay === 0) prev.decay = 1;
-                return prev;
+                return widen(prev);
             }
             const v3 = localStorage.getItem('phasegaze.settings.v3');
             if (v3) {
@@ -246,20 +260,20 @@ export class Ui {
                 prev.mirrors = true;
                 if (typeof prev.rings !== 'boolean')
                     prev.rings = false;
-                return prev;
+                return widen(prev);
             }
             const v2 = localStorage.getItem('phasegaze.settings.v2');
             if (v2) {
                 const prev = JSON.parse(v2) || {};
                 delete prev.density;
-                return prev;
+                return widen(prev);
             }
             const v1 = localStorage.getItem('phasegaze.settings.v1');
             if (v1) {
                 const prev = JSON.parse(v1) || {};
                 delete prev.size;
                 delete prev.density;
-                return prev;
+                return widen(prev);
             }
             return {};
         } catch (_) { return {}; }
@@ -690,29 +704,71 @@ export class Ui {
 
     _freqToX(f) { return (f - HW_MIN) / (HW_MAX - HW_MIN); }
 
-    /* Piecewise axis: two UNII clusters, compressed hole between them. */
+    _wifiViewDef() {
+        return WIFI_VIEWS.find(v => v.id === this._wifiView) || WIFI_VIEWS[0];
+    }
+
+    _wifiViewSpan() {
+        const v = this._wifiViewDef();
+        return [v.f0, v.f1];
+    }
+
+    /* Piecewise axis for the visible band. 5 GHz compresses the 5330–5490 hole. */
+    _rebuildWifiAxis() {
+        const scan = this._wifiViewDef().scan;
+        const nGap = Math.max(0, scan.length - 1);
+        const gapW = nGap ? WIFI_GAP : 0;
+        const usable = 1 - nGap * gapW;
+        let occ = 0;
+        for (const b of scan) occ += b[1] - b[0];
+        const segs = [];
+        let x = 0;
+        for (let i = 0; i < scan.length; i++) {
+            const a = scan[i][0], b = scan[i][1];
+            const w = occ > 0 ? usable * (b - a) / occ : 0;
+            segs.push({ a, b, x0: x, x1: x + w, gap: false });
+            x += w;
+            if (i + 1 < scan.length) {
+                segs.push({ a: b, b: scan[i + 1][0], x0: x, x1: x + gapW, gap: true });
+                x += gapW;
+            }
+        }
+        this._wifiSegs = segs;
+    }
+
     _wifiToX(f) {
-        const a0 = WIFI_SCAN_BANDS[0][0], a1 = WIFI_SCAN_BANDS[0][1];
-        const b0 = WIFI_SCAN_BANDS[1][0], b1 = WIFI_SCAN_BANDS[1][1];
-        const spanA = a1 - a0, spanB = b1 - b0;
-        const usable = 1 - WIFI_GAP;
-        const wA = usable * spanA / (spanA + spanB);
-        const wB = usable - wA;
-        if (f <= a1) return wA * Math.max(0, (f - a0) / spanA);
-        if (f < b0) return wA + WIFI_GAP * (f - a1) / (b0 - a1);
-        return wA + WIFI_GAP + wB * Math.min(1, Math.max(0, (f - b0) / spanB));
+        const segs = this._wifiSegs;
+        if (!segs || !segs.length) return 0;
+        if (f <= segs[0].a) return 0;
+        for (const s of segs) {
+            if (f <= s.b) {
+                const den = s.b - s.a;
+                const u = den > 0 ? (f - s.a) / den : 0;
+                return s.x0 + u * (s.x1 - s.x0);
+            }
+        }
+        return 1;
     }
 
     _wifiXToF(x) {
-        const a0 = WIFI_SCAN_BANDS[0][0], a1 = WIFI_SCAN_BANDS[0][1];
-        const b0 = WIFI_SCAN_BANDS[1][0], b1 = WIFI_SCAN_BANDS[1][1];
-        const spanA = a1 - a0, spanB = b1 - b0;
-        const usable = 1 - WIFI_GAP;
-        const wA = usable * spanA / (spanA + spanB);
-        const wB = usable - wA;
-        if (x <= wA) return a0 + (x / Math.max(wA, 1e-9)) * spanA;
-        if (x < wA + WIFI_GAP) return a1 + ((x - wA) / WIFI_GAP) * (b0 - a1);
-        return b0 + ((x - wA - WIFI_GAP) / Math.max(wB, 1e-9)) * spanB;
+        const segs = this._wifiSegs;
+        if (!segs || !segs.length) return WIFI_F0;
+        if (x <= 0) return segs[0].a;
+        for (const s of segs) {
+            if (x <= s.x1) {
+                const den = s.x1 - s.x0;
+                const u = den > 0 ? (x - s.x0) / den : 0;
+                return s.a + u * (s.b - s.a);
+            }
+        }
+        return segs[segs.length - 1].b;
+    }
+
+    _wifiInHole(f) {
+        const segs = this._wifiSegs;
+        if (!segs) return false;
+        for (const s of segs) if (s.gap && f >= s.a && f < s.b) return true;
+        return false;
     }
 
     _placeFft() {
@@ -738,12 +794,25 @@ export class Ui {
     }
 
     _buildWifi() {
+        const views = $('wifi-views');
+        for (const v of WIFI_VIEWS) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'tab';
+            b.dataset.view = v.id;
+            b.textContent = v.label;
+            b.onclick = (e) => {
+                e.stopPropagation();
+                if (this._wifiView === v.id) return;
+                this._wifiView = v.id;
+                this.s.wifiView = v.id;
+                this._layoutWifi();
+                this._syncFreqColor();
+                this.save();
+            };
+            views.appendChild(b);
+        }
         const inner = $('wifi-tiers');
-        const gap = document.createElement('div');
-        gap.id = 'wifi-gap';
-        gap.style.left = (this._wifiToX(WIFI_SCAN_BANDS[0][1]) * 100) + '%';
-        gap.style.width = ((this._wifiToX(WIFI_SCAN_BANDS[1][0]) - this._wifiToX(WIFI_SCAN_BANDS[0][1])) * 100) + '%';
-        inner.appendChild(gap);
         WIFI_TIERS.forEach((tier, ti) => {
             const row = document.createElement('div');
             row.className = 'tier-row';
@@ -751,17 +820,17 @@ export class Ui {
             for (const t of tier.tiles) {
                 const el = document.createElement('div');
                 el.className = 'tile';
-                const x0 = this._wifiToX(t.f0), x1 = this._wifiToX(t.f1);
-                el.style.left = (x0 * 100) + '%';
-                el.style.width = ((x1 - x0) * 100) + '%';
                 el.textContent = t.label;
+                el.title = t.title;
                 el.dataset.f0 = t.f0;
                 el.dataset.f1 = t.f1;
                 el.dataset.bw = t.bw;
+                el.dataset.view = t.view;
                 row.appendChild(el);
             }
             inner.appendChild(row);
         });
+        this._layoutWifi();
 
         const selectTab = (tid, apply) => {
             const prev = this._freqTab;
@@ -814,6 +883,32 @@ export class Ui {
         this._restoreWifiTiles();
         selectTab(this._freqTab, false);
         this._placeFft();
+    }
+
+    _layoutWifi() {
+        this._rebuildWifiAxis();
+        const view = this._wifiView;
+        const inner = $('wifi-tiers');
+        for (const el of inner.querySelectorAll('.wifi-gap')) el.remove();
+        for (const s of this._wifiSegs) {
+            if (!s.gap) continue;
+            const gap = document.createElement('div');
+            gap.className = 'wifi-gap';
+            gap.style.left = (s.x0 * 100) + '%';
+            gap.style.width = ((s.x1 - s.x0) * 100) + '%';
+            inner.appendChild(gap);
+        }
+        for (const el of inner.querySelectorAll('.tile')) {
+            const show = el.dataset.view === view;
+            el.style.display = show ? '' : 'none';
+            if (!show) continue;
+            const x0 = this._wifiToX(+el.dataset.f0);
+            const x1 = this._wifiToX(+el.dataset.f1);
+            el.style.left = (x0 * 100) + '%';
+            el.style.width = ((x1 - x0) * 100) + '%';
+        }
+        for (const b of document.querySelectorAll('#wifi-views .tab'))
+            b.classList.toggle('on', b.dataset.view === view);
     }
 
     _restoreWifiTiles() {
@@ -943,7 +1038,10 @@ export class Ui {
         this._specF1 = header.loEnd;
         this._fftSrvNorm = !!(header.sweeps & 1);
         const lo0 = (header.sweeps >>> 1) / 10;
-        const uiSig = `${this._freqTab}|${this.s.manualLo}|${this.s.manualHi}|${(this.s.wifiSel || []).join(',')}`;
+        /* Raw thumb MHz changes inside a slice do not retune. Keying the
+         * plan-snap off them paused hop EQ and jumped the Y scale. */
+        const [g0, g1] = this._freqTab === 'wifi' ? [0, 0] : this._rangeSlices();
+        const uiSig = `${this._freqTab}|${g0}|${g1}|${(this.s.wifiSel || []).join(',')}`;
         if (lo0 !== this._fftPlanLo0 || uiSig !== this._fftUiSig) {
             this._fftPlanLo0 = lo0;
             this._fftUiSig = uiSig;
@@ -967,8 +1065,7 @@ export class Ui {
         const specF1 = this._specF1 ?? HW_MAX;
         const n = this._fftAvg ? this._fftAvg.length : 0;
         const bin = n ? (specF1 - specF0) / n : 1;
-        const view0 = this._freqTab === 'wifi' ? WIFI_F0 : HW_MIN;
-        const view1 = this._freqTab === 'wifi' ? WIFI_F1 : HW_MAX;
+        const [view0, view1] = this._freqTab === 'wifi' ? this._wifiViewSpan() : [HW_MIN, HW_MAX];
         const i0 = Math.max(0, Math.floor((view0 - specF0) / bin));
         const i1 = Math.min(n, Math.ceil((view1 - specF0) / bin));
         return { view0, view1, specF0, specF1, bin, i0, i1, n };
@@ -977,9 +1074,12 @@ export class Ui {
     _fftHopLo(f) {
         let start;
         if (this._freqTab === 'wifi') {
-            if (f < 5410) start = 5170;
-            else if (f < 5732.5) start = 5490;
-            else start = 5735;
+            const bands = WIFI_HOP_BANDS;
+            start = bands[bands.length - 1][0];
+            for (let i = 0; i < bands.length - 1; i++) {
+                const mid = 0.5 * (bands[i][1] + bands[i + 1][0]);
+                if (f < mid) { start = bands[i][0]; break; }
+            }
         } else {
             start = this._fftPlanLo0 > 0 ? this._fftPlanLo0 - FFT_HOP_MHZ / 2 : this.s.manualLo;
         }
@@ -1284,14 +1384,13 @@ export class Ui {
     _fftPcts(src) {
         const { i0, i1, specF0, bin } = this._fftView();
         const wifi = this._freqTab === 'wifi';
-        const a1 = WIFI_SCAN_BANDS[0][1], b0 = WIFI_SCAN_BANDS[1][0];
         const out = this._fftScratch;
         out.length = 0;
         for (let i = i0; i < i1; i++) {
             const raw = src[i];
             if (raw <= 1e-8) continue;
             const f = specF0 + i * bin;
-            if (wifi && f >= a1 && f < b0) continue;
+            if (wifi && this._wifiInHole(f)) continue;
             out.push(this._fftEqI(raw, i));
         }
         if (out.length < 8) return { p10: 0, p98: 0, n: out.length };
@@ -1346,11 +1445,13 @@ export class Ui {
         const base = lo * (1 - FFT_LO_PAD);
         const span = Math.max(hi - base, 1e-6);
         const wifi = this._freqTab === 'wifi';
-        if (wifi) {
-            const gx0 = this._wifiToX(WIFI_SCAN_BANDS[0][1]) * w;
-            const gx1 = this._wifiToX(WIFI_SCAN_BANDS[1][0]) * w;
+        if (wifi && this._wifiSegs) {
             ctx.fillStyle = 'rgba(255,255,255,0.035)';
-            ctx.fillRect(gx0, 0, Math.max(gx1 - gx0, 1), h);
+            for (const s of this._wifiSegs) {
+                if (!s.gap) continue;
+                const gx0 = s.x0 * w, gx1 = s.x1 * w;
+                ctx.fillRect(gx0, 0, Math.max(gx1 - gx0, 1), h);
+            }
         }
         const scheme = this.s.scheme;
         const lut = this._fftLut();
@@ -1363,13 +1464,12 @@ export class Ui {
             }
             ctx.fillStyle = g;
         }
-        const a1 = WIFI_SCAN_BANDS[0][1], b0 = WIFI_SCAN_BANDS[1][0];
         const chan = this._chanRanges;
         for (let i = i0; i < i1; i++) {
             const raw = src[i];
             if (raw <= 0) continue;
             const bf0 = specF0 + i * bin;
-            if (wifi && bf0 >= a1 && bf0 < b0) continue;
+            if (wifi && this._wifiInHole(bf0)) continue;
             const v = this._fftEqI(raw, i);
             const vh = Math.min(1, Math.max(0, (v - base) / span));
             if (vh <= 0) continue;
@@ -1421,6 +1521,10 @@ export class Ui {
 
     _drawTargetMark(ctx, w, h, wifi, view0, view1) {
         const f = this.s.targetFreq;
+        if (wifi) {
+            const [a, b] = this._wifiViewSpan();
+            if (f < a || f > b) return;
+        }
         const x = wifi ? this._wifiToX(f) * w : ((f - view0) / (view1 - view0)) * w;
         if (x < 0 || x > w) return;
         ctx.fillStyle = 'rgba(255,255,255,0.45)';
@@ -1451,7 +1555,8 @@ export class Ui {
             const r = bar.getBoundingClientRect();
             let t = (clientX - r.left) / r.width;
             t = Math.max(0, Math.min(1, t));
-            const f = Math.round(HW_MIN + t * (HW_MAX - HW_MIN));
+            let f = Math.round(HW_MIN + t * (HW_MAX - HW_MIN));
+            f = Math.max(this.boardLo, Math.min(this.boardHi, f));
             if (key === 'mid' || this.s.scheme === 'target') {
                 this._applyRangeKeyed(key, f);
                 if (this.s.scheme === 'target') this._syncTargetFromRange();
@@ -1491,7 +1596,8 @@ export class Ui {
             const r = bar.getBoundingClientRect();
             let t = (clientX - r.left) / r.width;
             t = Math.max(0, Math.min(1, t));
-            const f = Math.round(HW_MIN + t * (HW_MAX - HW_MIN));
+            let f = Math.round(HW_MIN + t * (HW_MAX - HW_MIN));
+            f = Math.max(this.boardLo, Math.min(this.boardHi, f));
             const mid = 0.5 * (this.s.manualLo + this.s.manualHi);
             const dLo = Math.abs(f - this.s.manualLo);
             const dHi = Math.abs(f - this.s.manualHi);
@@ -1518,8 +1624,8 @@ export class Ui {
                 this._commitWifiSel();
                 return;
             }
-            this.s.manualLo = HW_MIN;
-            this.s.manualHi = HW_MAX;
+            this.s.manualLo = this.boardLo;
+            this.s.manualHi = this.boardHi;
             if (this.s.scheme === 'target') this._syncTargetFromRange();
             layout();
             this._applyManualRange(true);
@@ -1533,8 +1639,8 @@ export class Ui {
         if (key === 'mid') {
             const half = Math.max(minHalf, 0.5 * (this.s.manualHi - this.s.manualLo));
             let c = f;
-            if (c - half < HW_MIN) c = HW_MIN + half;
-            if (c + half > HW_MAX) c = HW_MAX - half;
+            if (c - half < this.boardLo) c = this.boardLo + half;
+            if (c + half > this.boardHi) c = this.boardHi - half;
             this.s.manualLo = Math.round(c - half);
             this.s.manualHi = Math.round(c + half);
             return;
@@ -1544,7 +1650,7 @@ export class Ui {
             : 0.5 * (this.s.manualLo + this.s.manualHi);
         let half = key === 'lo' ? (c - f) : (f - c);
         half = Math.max(minHalf, half);
-        const maxHalf = Math.min(c - HW_MIN, HW_MAX - c);
+        const maxHalf = Math.min(c - this.boardLo, this.boardHi - c);
         if (half > maxHalf) half = maxHalf;
         this.s.manualLo = Math.round(c - half);
         this.s.manualHi = Math.round(c + half);
@@ -1561,6 +1667,21 @@ export class Ui {
         $('target-freq').value = this.s.targetFreq;
         $('target-freq-val').textContent = `${this.s.targetFreq} MHZ`;
         $('target-width-val').textContent = `\u00b1${this.s.targetWidth} MHZ`;
+    }
+
+    /* Hardware slices anchored at HW_MIN. Matches snap_hw_slices(). */
+    _rangeSlices() {
+        const step = FFT_HOP_MHZ;
+        const loB = this.boardLo, hiB = this.boardHi;
+        let a0 = HW_MIN + step * Math.floor((this.s.manualLo - HW_MIN) / step + 1e-6);
+        let b1 = HW_MIN + step * Math.ceil((this.s.manualHi - HW_MIN) / step - 1e-6);
+        if (b1 <= a0) b1 = a0 + step;
+        if (a0 < loB) a0 = HW_MIN + step * Math.ceil((loB - HW_MIN) / step - 1e-9);
+        if (b1 > hiB) b1 = HW_MIN + step * Math.floor((hiB - HW_MIN) / step + 1e-9);
+        if (a0 < HW_MIN) a0 = HW_MIN;
+        if (b1 > HW_MAX) b1 = HW_MAX;
+        if (b1 <= a0) b1 = hiB;
+        return [a0, b1];
     }
 
     _applyManualRange(force) {
@@ -1588,8 +1709,8 @@ export class Ui {
         this._syncFreqColor();
     }
 
-    /* RANGE PIN: HSV locked to 4900–6100. Off: stretch to the thumbs.
-     * WIFI BAND / CHAN / FULL: 5170–5895 stretch, per-channel hues, or 4900–6100. */
+    /* RANGE PIN: HSV locked to the hardware span. Off: stretch to the thumbs.
+     * WIFI BAND / CHAN / FULL: 5170–6725 stretch, per-channel hues, or the hardware span. */
     _wifiChanRanges() {
         const tiles = [...document.querySelectorAll('#wifi-tiers .tile.on')]
             .map(el => {
@@ -1650,7 +1771,7 @@ export class Ui {
     }
 
     _maxTargetWidth(freq) {
-        return Math.max(freq - HW_MIN, HW_MAX - freq);
+        return Math.max(freq - this.boardLo, this.boardHi - freq);
     }
 
     _clampTargetWidth() {
@@ -1761,12 +1882,12 @@ export class Ui {
     _applyTargetSweep(force) {
         let lo = this.s.targetFreq - this.s.targetWidth;
         let hi = this.s.targetFreq + this.s.targetWidth;
-        lo = Math.max(HW_MIN, lo);
-        hi = Math.min(HW_MAX, hi);
+        lo = Math.max(this.boardLo, lo);
+        hi = Math.min(this.boardHi, hi);
         if (hi - lo < 18) {
             const mid = 0.5 * (lo + hi);
-            lo = Math.max(HW_MIN, mid - 9);
-            hi = Math.min(HW_MAX, mid + 9);
+            lo = Math.max(this.boardLo, mid - 9);
+            hi = Math.min(this.boardHi, mid + 9);
         }
         this.s.manualLo = lo;
         this.s.manualHi = hi;
@@ -1851,10 +1972,42 @@ export class Ui {
 
         $('s-clear').onclick = () => this.renderer.clearPoints();
         $('s-defaults').onclick = () => this._restoreDefaults();
+        $('s-lock').onclick = () => {
+            if (this.state && this.state.lock_busy) return;
+            this.net.send({ type: 'lock_cal' });
+            const lab = $('v-lock');
+            if (lab) lab.textContent = 'MEASURING';
+            $('s-lock').disabled = true;
+            $('s-sweep-lo').disabled = true;
+            $('s-sweep-hi').disabled = true;
+        };
+        this._bindSweepFields();
+    }
+
+    /* The two boxes are the sweep ceiling, not the slider thumbs. A typed
+     * value is snapped on the board; don't overwrite the box mid-keystroke. */
+    _bindSweepFields() {
+        const lo = $('s-sweep-lo'), hi = $('s-sweep-hi');
+        const commit = () => {
+            this._sweepEdit = false;
+            const a = parseInt(lo.value, 10);
+            const b = parseInt(hi.value, 10);
+            if (!Number.isFinite(a) || !Number.isFinite(b)) return;
+            this.net.set({ hw_min: a, hw_max: b });
+        };
+        for (const el of [lo, hi]) {
+            el.addEventListener('input', () => { this._sweepEdit = true; });
+            el.addEventListener('change', commit);
+            el.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') el.blur();
+            });
+        }
     }
 
     _restoreDefaults() {
         this.s = { ...DEFAULTS, wifiSel: [], corners: defaultCorners() };
+        this.s.manualLo = this.boardLo;
+        this.s.manualHi = this.boardHi;
         this.save();
         this._applyAll();
         this._syncSchemeUi();
@@ -1938,9 +2091,57 @@ export class Ui {
     // Status / fps line
     // ==================================================================
 
+    _lockLabel(st) {
+        if (!st || st.lock_busy) return 'MEASURING';
+        if (st.lock_err) return 'FAILED';
+        if (!(st.lock_lo > 0)) return 'NOT MEASURED';
+        return `${st.lock_lo}–${st.lock_hi}`;
+    }
+
+    _syncSweepFields(st) {
+        const lo = $('s-sweep-lo'), hi = $('s-sweep-hi');
+        if (!lo || !hi || !st) return;
+        const busy = !!st.lock_busy;
+        lo.disabled = busy;
+        hi.disabled = busy;
+        if (this._sweepEdit) return;
+        if (st.hw_min != null) lo.value = String(Math.round(st.hw_min));
+        if (st.hw_max != null) hi.value = String(Math.round(st.hw_max));
+    }
+
     onState(st) {
         this._gateRates(st);
         this.state = st;
+        if (st.hw_min != null && st.hw_max != null) {
+            const lo = st.hw_min, hi = st.hw_max;
+            const prevLo = this.boardLo, prevHi = this.boardHi;
+            const limChanged = lo !== prevLo || hi !== prevHi;
+            this.boardLo = lo;
+            this.boardHi = hi;
+            const tf = $('target-freq');
+            if (tf) { tf.min = String(lo); tf.max = String(hi); }
+            if (limChanged) {
+                let changed = false;
+                /* A thumb parked on the old ceiling follows it. A window
+                 * the user placed inside only moves when it would stick out. */
+                if (this.s.manualLo <= prevLo + 0.5) { this.s.manualLo = lo; changed = true; }
+                else if (this.s.manualLo < lo) { this.s.manualLo = lo; changed = true; }
+                if (this.s.manualHi >= prevHi - 0.5) { this.s.manualHi = hi; changed = true; }
+                else if (this.s.manualHi > hi) { this.s.manualHi = hi; changed = true; }
+                if (this.s.targetFreq < lo) this.s.targetFreq = lo;
+                if (this.s.targetFreq > hi) this.s.targetFreq = hi;
+                if (changed) {
+                    if (this._layoutManual) this._layoutManual();
+                    this._applyManualRange(true);
+                    this.save();
+                }
+            }
+        }
+        const lab = $('v-lock');
+        if (lab) lab.textContent = this._lockLabel(st);
+        this._syncSweepFields(st);
+        const lockBtn = $('s-lock');
+        if (lockBtn) lockBtn.disabled = !!st.lock_busy;
         if (!this._gainDraggingRef()) {
             // don't fight the user's finger; adopt backend gain otherwise
             const g = Math.max(0, Math.min(RF_GAIN_MAX, st.gain | 0));

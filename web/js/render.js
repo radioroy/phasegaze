@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 export const SF_PER_MHZ = 2 * Math.PI * 0.0455 / 299.792458; // 2*pi*d/lambda per MHz
+const HW_LO = 4480, HW_HI = 6740, HW_SPAN = HW_HI - HW_LO;
 const ORBIT_HOME = 2.45;      // default orbit radius (scroll zoom)
 const CAPACITY = 65536;
 
@@ -122,7 +123,7 @@ void main() {
     vec3 col;
     if (uColorMode == 0) {
         if (uChanMap > 0.5) {
-            float u = clamp((freq - 4900.0) / 1200.0, 0.0, 1.0);
+            float u = clamp((freq - ${HW_LO}.0) / ${HW_SPAN}.0, 0.0, 1.0);
             vec4 cm = texture2D(uFreqT, vec2(u, 0.5));
             if (cm.a < 0.5) { col = vec3(0.28, 0.30, 0.34); alpha *= 0.3; }
             else col = texture2D(uLut, vec2(cm.r, 0.5)).rgb;
@@ -205,7 +206,7 @@ uniform float uChanMap, uFreqLo, uFreqHi, uSweepLo, uSweepHi;
 
 vec3 freqColor(float freq) {
     if (uChanMap > 0.5) {
-        float u = clamp((freq - 4900.0) / 1200.0, 0.0, 1.0);
+        float u = clamp((freq - ${HW_LO}.0) / ${HW_SPAN}.0, 0.0, 1.0);
         vec4 cm = texture2D(uFreqT, vec2(u, 0.5));
         if (cm.a < 0.5) return vec3(0.28, 0.30, 0.34);
         return texture2D(uLut, vec2(cm.r, 0.5)).rgb;
@@ -328,7 +329,8 @@ export class VrfRenderer {
         this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false });
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setClearColor(0x000000, 1);
+        // Transparent clear: the page opens in camera mode, video behind the canvas.
+        this.renderer.setClearColor(0x000000, 0);
 
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 100);
@@ -343,13 +345,16 @@ export class VrfRenderer {
         this.controls.saveState();
 
         // ---- state ----
-        this.morph = 1; this.morphTarget = 1;
+        // morph 0 is camera (screen-space points, shell hidden). The 0.7 s
+        // ease in render() is the SPHERE <-> CAM transition, so startup
+        // begins already there instead of fading the sphere out.
+        this.morph = 0; this.morphTarget = 0;
         this.camMode = false;
         this.sphereCam = 'orbit';          // 'orbit' | 'inside'
         this.imuQuat = new THREE.Quaternion();
         this.imuEnabled = false;
         this.insideYaw = 0; this.insidePitch = 0;
-        this.freqLo = 4900; this.freqHi = 6100;
+        this.freqLo = HW_LO; this.freqHi = HW_HI;
         this.showMirrors = false;
         this.showBottom = false;
         this.onMorph = null;
@@ -385,8 +390,8 @@ export class VrfRenderer {
 
         const lutTex = new THREE.DataTexture(new Uint8Array(256 * 4).fill(255), 256, 1);
         lutTex.needsUpdate = true;
-        this._chanData = new Uint8Array(1200 * 4);
-        this._chanTex = new THREE.DataTexture(this._chanData, 1200, 1);
+        this._chanData = new Uint8Array(HW_SPAN * 4);
+        this._chanTex = new THREE.DataTexture(this._chanData, HW_SPAN, 1);
         this._chanTex.magFilter = THREE.NearestFilter;
         this._chanTex.minFilter = THREE.NearestFilter;
         this._chanTex.flipY = false;
@@ -409,7 +414,7 @@ export class VrfRenderer {
             uLut: { value: lutTex },
             uFreqT: { value: this._chanTex },
             uChanMap: { value: 0 },
-            uFreqLo: { value: 4900 }, uFreqHi: { value: 6100 },
+            uFreqLo: { value: HW_LO }, uFreqHi: { value: HW_HI },
             uTargetFreq: { value: 5500 }, uTargetWidth: { value: 40 },
         };
 
@@ -460,8 +465,8 @@ export class VrfRenderer {
     _buildShell() {
         this.shellUniforms = {
             uScaleFactor: { value: SF_PER_MHZ * 5500 },
-            uScaleFactorLow: { value: SF_PER_MHZ * 4900 },
-            uScaleFactorHigh: { value: SF_PER_MHZ * 6100 },
+            uScaleFactorLow: { value: SF_PER_MHZ * HW_LO },
+            uScaleFactorHigh: { value: SF_PER_MHZ * HW_HI },
             uOpacity: { value: 0 },
             uShowTiles: { value: 1 },
             uShowRings: { value: 0 },
@@ -469,10 +474,10 @@ export class VrfRenderer {
             uLut: { value: this.pointUniforms.uLut.value },
             uFreqT: { value: this._chanTex },
             uChanMap: { value: 0 },
-            uFreqLo: { value: 4900 },
-            uFreqHi: { value: 6100 },
-            uSweepLo: { value: 4900 },
-            uSweepHi: { value: 6100 },
+            uFreqLo: { value: HW_LO },
+            uFreqHi: { value: HW_HI },
+            uSweepLo: { value: HW_LO },
+            uSweepHi: { value: HW_HI },
         };
         const mkMat = () => new THREE.ShaderMaterial({
             uniforms: this.shellUniforms,
@@ -503,6 +508,7 @@ export class VrfRenderer {
             }));
         this.boresight.renderOrder = 1;
         this.shellGroup.add(this.boresight);
+        this.shellGroup.visible = this.morph > 0.02;
     }
 
     // ------------------------------------------------------------------
@@ -605,8 +611,8 @@ export class VrfRenderer {
             return;
         }
         for (const r of ranges) {
-            const i0 = Math.max(0, Math.floor(r.f0 - 4900));
-            const i1 = Math.min(1200, Math.ceil(r.f1 - 4900));
+            const i0 = Math.max(0, Math.floor(r.f0 - HW_LO));
+            const i1 = Math.min(HW_SPAN, Math.ceil(r.f1 - HW_LO));
             const t8 = Math.round(Math.max(0, Math.min(1, r.t)) * 255);
             for (let i = i0; i < i1; i++) {
                 data[i * 4] = t8;
@@ -745,7 +751,7 @@ export class VrfRenderer {
         if (this.onMorph) this.onMorph(this.morph);
 
         /* Boresight hex = unambiguous cell at mid occupied RF (2πd/λ).
-         * Uses the keep-band header, not the WIFI 5170–5895 catalog. */
+         * Uses the keep-band header, not the WIFI 5170–6725 catalog. */
         const sfC = SF_PER_MHZ * 0.5 * (this.freqLo + this.freqHi);
         this.shellUniforms.uScaleFactor.value = sfC;
         this.shellUniforms.uScaleFactorLow.value = SF_PER_MHZ * this.freqLo;

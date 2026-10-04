@@ -137,9 +137,11 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 #freq-wifi #wifi-tiers { margin-right: 72px; }
 #fft-canvas { display: block; width: 100%; height: 48px; }
 
-/* wifi tier graphic — linear 5170–5895, no horizontal scroll */
+/* wifi tier graphic — one band view at a time, no horizontal scroll */
+#wifi-views { display: flex; gap: 6px; margin: 0 72px 6px 0; }
+#wifi-views .tab { padding: 3px 10px; font-size: 10px; letter-spacing: 0.12em; }
 #wifi-tiers { position: relative; height: 96px; overflow: hidden; touch-action: none; }
-#wifi-gap { position: absolute; top: 2px; bottom: 2px; pointer-events: none;
+.wifi-gap { position: absolute; top: 2px; bottom: 2px; pointer-events: none;
     background: rgba(255,255,255,0.035); }
 .tier-row { position: absolute; left: 0; right: 0; height: 32px; }
 .tile { position: absolute; top: 2px; bottom: 2px; border: 1px solid var(--line-hi);
@@ -156,6 +158,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     letter-spacing: 0.15em; cursor: pointer; }
 .abtn.primary { border-color: var(--acc); color: var(--acc); }
 .abtn:active { background: var(--acc-soft); }
+.abtn:disabled { opacity: 0.45; cursor: default; }
 
 /* manual dual-thumb range */
 #manual-wrap { padding: 2px 72px; }
@@ -224,6 +227,21 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 #s-accent::-webkit-color-swatch-wrapper { padding: 3px; }
 #s-accent::-webkit-color-swatch { border: none; }
 #s-accent::-moz-color-swatch { border: none; }
+
+/* Sweep ceiling. The spectrum axis stays 4480–6740; these are the edges
+   the hop plan will not cross. */
+.sweep-ed { display: flex; align-items: center; gap: 8px; }
+.sweep-ed input[type=number] {
+    width: 84px; padding: 8px 4px; text-align: center;
+    background: var(--bg); color: var(--acc); border: 1px solid var(--line-hi);
+    font: inherit; font-size: 13px; letter-spacing: 0.04em;
+    user-select: text; -webkit-user-select: text; }
+.sweep-ed input[type=number]:focus { border-color: var(--acc); outline: none; }
+.sweep-ed input[type=number]:disabled { opacity: 0.45; }
+.sweep-ed input[type=number]::-webkit-outer-spin-button,
+.sweep-ed input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.sweep-ed input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+.sweep-ed .dash, .sweep-ed .unit { color: var(--dim); font-size: 11px; letter-spacing: 0.12em; }
 
 </style>
 <script type="importmap">
@@ -314,6 +332,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     </div>
 
     <div id="freq-wifi" style="display:none">
+        <div id="wifi-views"></div>
         <div id="wifi-tiers"></div>
     </div>
 </div>
@@ -325,11 +344,11 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     <div id="target-opts">
         <div class="srow">
             <label>TARGET FREQ <span id="target-freq-val"></span></label>
-            <input type="range" id="target-freq" min="4900" max="6100" step="1">
+            <input type="range" id="target-freq" min="4480" max="6740" step="1">
         </div>
         <div class="srow">
             <label>WINDOW <span id="target-width-val"></span></label>
-            <input type="range" id="target-width" min="9" max="1200" step="1">
+            <input type="range" id="target-width" min="9" max="2260" step="1">
         </div>
     </div>
 </div>
@@ -371,6 +390,21 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
         <input type="color" id="s-accent" value="#b8c4b8">
     </div>
 
+    <div class="sect">RF LOCK</div>
+    <div class="srow"><label>PIN <span id="v-lock">NOT MEASURED</span></label></div>
+    <div class="srow">
+        <label>SWEEP</label>
+        <div class="sweep-ed">
+            <input id="s-sweep-lo" type="number" inputmode="numeric" min="4480" max="6740" step="20" value="4480">
+            <span class="dash">–</span>
+            <input id="s-sweep-hi" type="number" inputmode="numeric" min="4480" max="6740" step="20" value="6740">
+            <span class="unit">MHZ</span>
+        </div>
+    </div>
+    <div class="actions">
+        <button class="abtn" id="s-lock">MEASURE LOCK</button>
+    </div>
+
     <div class="sect">SYSTEM</div>
     <div class="actions">
         <button class="abtn" id="s-clear">CLEAR POINTS</button>
@@ -378,6 +412,6 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     </div>
 </div>
 
-<script type="module" src="./app.js?v=pg72"></script>
+<script type="module" src="./app.js?v=pg78"></script>
 </body>
 </html>
