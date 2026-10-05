@@ -2474,15 +2474,29 @@ export class Ui {
         this._vidBusy = false;
         this._vidPending = null;
         this._vidUrl = null;
+        this._vidPrevUrl = null;
+        const img = $('vid-img');
+        if (img) img.style.display = 'none';
     }
 
     _dropVidUrl() {
+        if (this._vidPrevUrl) {
+            URL.revokeObjectURL(this._vidPrevUrl);
+            this._vidPrevUrl = null;
+        }
         if (this._vidUrl) {
             URL.revokeObjectURL(this._vidUrl);
             this._vidUrl = null;
         }
+        this._vidBusy = false;
+        this._vidPending = null;
         const img = $('vid-img');
-        if (img) img.removeAttribute('src');
+        if (img) {
+            img.onload = null;
+            img.onerror = null;
+            img.removeAttribute('src');
+            img.style.display = 'none';
+        }
     }
 
     _vidMsg(text) {
@@ -2502,12 +2516,12 @@ export class Ui {
         if (st.mode === 'video') {
             if (this._vidClosed) return;
             if (st.video_mhz !== this._vidMhz) {
+                const isHop = this._vidMhz !== null && Math.abs(st.video_mhz - this._vidMhz) >= 5;
                 this._vidMhz = st.video_mhz;
-                /* A recenter restarts the decoder and the MHz changes.
-                 * Dropping the frame here puts TUNING back over a picture
-                 * that was already up, for as long as the new pipeline
-                 * takes to emit. Keep the last frame until the next one. */
-                if (!this._vidGot) {
+                /* A recenter keeps the picture up until the next frame.
+                 * A channel hop drops the frame and shows TUNING. */
+                if (isHop || !this._vidGot) {
+                    this._vidGot = false;
                     this._dropVidUrl();
                     $('vid-fps').textContent = '';
                 }
@@ -2522,6 +2536,7 @@ export class Ui {
         if (st.video_err && !this._vidClosed) {
             this._vidErrHold = st.video_err;
             this._vidGot = false;
+            this._dropVidUrl();
             win.classList.add('show');
             this._vidMsg(st.video_err.toUpperCase());
             $('vid-fps').textContent = '';
@@ -2558,17 +2573,25 @@ export class Ui {
     }
 
     _showJpeg(u8) {
+        if (this._vidClosed) return;
         this._vidBusy = true;
         const url = URL.createObjectURL(new Blob([u8], { type: 'image/jpeg' }));
         const img = $('vid-img');
         const prev = this._vidUrl;
+        this._vidPrevUrl = prev;
         this._vidUrl = url;
         const done = () => {
-            if (prev) URL.revokeObjectURL(prev);
+            if (img.onload === done) img.onload = null;
+            if (img.onerror === done) img.onerror = null;
+            if (prev) {
+                URL.revokeObjectURL(prev);
+                if (this._vidPrevUrl === prev) this._vidPrevUrl = null;
+            }
+            if (img.style.display !== 'block') img.style.display = 'block';
             this._vidBusy = false;
             const next = this._vidPending;
             this._vidPending = null;
-            if (next) this._showJpeg(next);
+            if (next && !this._vidClosed) this._showJpeg(next);
         };
         img.onload = done;
         img.onerror = done;

@@ -116,16 +116,24 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     font: inherit; font-size: 10px; letter-spacing: 0.14em; padding: 4px 8px;
     cursor: pointer; }
 #vid-stage { position: relative; aspect-ratio: 4 / 3; background: #000; }
-#vid-img { width: 100%; height: 100%; object-fit: contain; display: block; }
+#vid-img { width: 100%; height: 100%; object-fit: contain; display: none; }
 #vid-msg { position: absolute; inset: 0; display: flex; align-items: center;
     justify-content: center; font-size: 11px; letter-spacing: 0.16em; color: var(--dim);
     padding: 12px; text-align: center; }
 #hold-charge {
-    position: fixed; z-index: 10; width: 44px; height: 44px;
-    margin: -22px 0 0 -22px; border-radius: 50%; pointer-events: none;
+    --d: 44px;
+    position: fixed; z-index: 10; width: var(--d); height: var(--d);
+    margin: calc(var(--d) / -2) 0 0 calc(var(--d) / -2);
+    border-radius: 50%; pointer-events: none;
     display: none;
-    -webkit-mask: radial-gradient(farthest-side, transparent 62%, #000 64%);
-    mask: radial-gradient(farthest-side, transparent 62%, #000 64%);
+    /* ~8 px stroke, independent of diameter, so a larger mobile ring
+     * still reads as the same widget. */
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 7px));
+    mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 7px));
+}
+@media (pointer: coarse) {
+    /* ~21 mm; a fingertip is ~12 mm, so the color peeks around it. */
+    #hold-charge { --d: 80px; }
 }
 #hold-charge.on { display: block; }
 
@@ -511,6 +519,6 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     </div>
 </div>
 
-<script type="module" src="./app.js?v=pg91"></script>
+<script type="module" src="./app.js?v=pg93"></script>
 </body>
 </html>
