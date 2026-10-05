@@ -386,6 +386,23 @@ export class Ui {
         document.addEventListener('fullscreenchange', () => {
             $('btn-full').classList.toggle('on', !!document.fullscreenElement);
         });
+
+        // Browsers reject requestFullscreen without a user gesture, so the
+        // first click, tap, or key is the earliest call that can succeed.
+        // One shot: after that, Esc and FULL leave fullscreen for good.
+        const enterFs = (e) => {
+            if (e.type === 'keydown') {
+                if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+                if (e.key === 'Escape' || e.key === 'Shift' || e.key === 'Control' ||
+                    e.key === 'Alt' || e.key === 'Meta') return;
+            }
+            document.removeEventListener('click', enterFs, true);
+            document.removeEventListener('keydown', enterFs, true);
+            if (!document.fullscreenElement)
+                document.documentElement.requestFullscreen().catch(() => {});
+        };
+        document.addEventListener('click', enterFs, true);
+        document.addEventListener('keydown', enterFs, true);
     }
 
     // ==================================================================
