@@ -79,9 +79,23 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 #hold-row { position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
     z-index: 8; display: none; gap: 8px; align-items: center; }
 #hold-row.show { display: flex; }
-#hold-chip { background: var(--acc); color: var(--acc-ink);
-    border: 1px solid var(--acc); padding: 9px 14px; font: inherit; font-size: 11px;
-    letter-spacing: 0.15em; cursor: pointer; }
+#hold-resume { background: none; border: none; color: #e8ece8;
+    padding: 9px 2px; font: inherit; font-size: 11px; letter-spacing: 0.18em;
+    cursor: pointer; text-shadow: 0 1px 2px #000; }
+#hold-tune { display: flex; align-items: stretch; background: var(--bg);
+    border: 1px solid var(--line-hi); }
+#hold-dn, #hold-up { background: none; color: var(--txt); border: none;
+    padding: 9px 11px; font: inherit; font-size: 13px; letter-spacing: 0;
+    cursor: pointer; }
+#hold-dn:disabled, #hold-up:disabled { opacity: 0.35; cursor: default; }
+#hold-mhz { width: 58px; padding: 0; text-align: center;
+    background: none; color: #e8ece8; border: none;
+    font: inherit; font-size: 13px; letter-spacing: 0.04em;
+    user-select: text; -webkit-user-select: text; }
+#hold-mhz:focus { outline: none; color: var(--acc); }
+#hold-mhz::-webkit-outer-spin-button,
+#hold-mhz::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+#hold-mhz { -moz-appearance: textfield; appearance: textfield; }
 #hold-watch { background: var(--bg); color: var(--txt); border: 1px solid var(--line-hi);
     padding: 9px 14px; font: inherit; font-size: 11px; letter-spacing: 0.15em;
     cursor: pointer; }
@@ -342,7 +356,12 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 <div id="fps"></div>
 <div id="hint">TAP AND HOLD TO DWELL, DRAG TO MOVE, SCROLL TO ZOOM</div>
 <div id="hold-row">
-    <button type="button" id="hold-chip" title="Resume the sweep"></button>
+    <button type="button" id="hold-resume" title="Resume the sweep">HOLD</button>
+    <div id="hold-tune">
+        <button type="button" id="hold-dn" title="Tune down 1 MHz">−</button>
+        <input id="hold-mhz" type="number" inputmode="numeric" step="1" min="1000" max="8000" title="Hold LO, MHz">
+        <button type="button" id="hold-up" title="Tune up 1 MHz">+</button>
+    </div>
     <button type="button" id="hold-watch" title="Decode this carrier">WATCH</button>
 </div>
 <div id="aim-x"><i></i><i></i></div>
@@ -519,6 +538,6 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     </div>
 </div>
 
-<script type="module" src="./app.js?v=pg93"></script>
+<script type="module" src="./app.js?v=pg95"></script>
 </body>
 </html>

@@ -2292,42 +2292,67 @@ export class Ui {
     _noteSweepEdit() {
         if (!this._hold) return;
         this._hold = null;
-        this._syncHoldChip();
+        this._syncHoldUi();
     }
 
-    _sliceOf(freq) {
-        const step = FFT_HOP_MHZ;
-        if (!Number.isFinite(freq)) return null;
-        const lo = HW_MIN + step * Math.floor((freq - HW_MIN) / step);
-        const hi = lo + step;
-        if (lo < this.boardLo - 1e-3 || hi > this.boardHi + 1e-3) return null;
-        return [lo, hi];
+    /* One hop, LO on the picked bin rounded to 1 MHz. The 20 MHz keep-band
+     * is centered on that LO. Watch snapping is a separate path. */
+    _holdLoMin() { return Math.ceil(this.boardLo + 0.5 * FFT_HOP_MHZ); }
+    _holdLoMax() { return Math.floor(this.boardHi - 0.5 * FFT_HOP_MHZ); }
+
+    _holdOk(freq) {
+        return Number.isFinite(freq) &&
+            freq >= this.boardLo - 1 && freq <= this.boardHi + 1;
+    }
+
+    _holdMhz(freq) {
+        let f = Math.round(freq);
+        const lo = this._holdLoMin(), hi = this._holdLoMax();
+        if (f < lo) f = lo;
+        if (f > hi) f = hi;
+        return f;
     }
 
     _pushHold() {
-        const { lo, hi } = this._hold;
+        const f = this._hold.freq;
+        const lo = f - 0.5 * FFT_HOP_MHZ, hi = f + 0.5 * FFT_HOP_MHZ;
         this.net.set({ lo_start: lo, lo_end: hi, bands: [[lo, hi]] });
     }
 
-    _syncHoldChip() {
+    _syncHoldUi() {
         const row = $('hold-row');
-        const el = $('hold-chip');
+        const input = $('hold-mhz');
         if (!this._hold) {
             row.classList.remove('show');
-            el.textContent = '';
+            if (document.activeElement !== input) input.value = '';
+            $('hold-dn').disabled = true;
+            $('hold-up').disabled = true;
             return;
         }
         const f = this._hold.freq;
-        const s = Number.isFinite(f) ? this._snapMhz(f, true) : null;
-        const mid = s ? Math.round(s.mhz) : Math.round(0.5 * (this._hold.lo + this._hold.hi));
-        el.textContent = `HOLD ${mid}`;
+        if (document.activeElement !== input) input.value = String(f);
+        $('hold-dn').disabled = f <= this._holdLoMin();
+        $('hold-up').disabled = f >= this._holdLoMax();
         row.classList.add('show');
     }
 
-    _beginHold(lo, hi, freq) {
+    _tuneHold(mhz) {
+        if (!this._hold || !Number.isFinite(mhz)) return;
+        const f = this._holdMhz(mhz);
+        if (f === this._hold.freq) {
+            this._syncHoldUi();
+            return;
+        }
+        this._hold.freq = f;
+        this._pushHold();
+        this._syncHoldUi();
+    }
+
+    _beginHold(freq) {
+        const f = this._holdMhz(freq);
         if (!this._hold) {
             this._hold = {
-                lo, hi, freq,
+                freq: f,
                 saved: {
                     manualLo: this.s.manualLo,
                     manualHi: this.s.manualHi,
@@ -2337,12 +2362,10 @@ export class Ui {
                 },
             };
         } else {
-            this._hold.lo = lo;
-            this._hold.hi = hi;
-            this._hold.freq = freq;
+            this._hold.freq = f;
         }
         this._pushHold();
-        this._syncHoldChip();
+        this._syncHoldUi();
         clearTimeout(this._hintTimer);
         this._setHint(false);
     }
@@ -2351,7 +2374,7 @@ export class Ui {
         const h = this._hold;
         if (!h) return;
         this._hold = null;
-        this._syncHoldChip();
+        this._syncHoldUi();
         this._bumpHint();
         if (!restore) return;
         const s = h.saved;
@@ -2390,8 +2413,7 @@ export class Ui {
                 return;
             }
             const hit = this.renderer.pickFreq(e.clientX, e.clientY);
-            const slice = hit && this._sliceOf(hit.freq);
-            if (!slice) return;
+            if (!hit || !this._holdOk(hit.freq)) return;
             const rgb = this.renderer.pointColor(hit.freq, hit.inten);
             const freq = hit.freq;
             /* OS long-press haptic is ~500 ms. A 900 ms ring left the
@@ -2399,12 +2421,12 @@ export class Ui {
             const ms = e.pointerType === 'touch' ? 500 : 900;
             const commit = () => {
                 if (!arm || arm.release) return;
-                const lo = arm.lo, hi = arm.hi, f = arm.freq;
+                const f = arm.freq;
                 drop();
                 if (this.state && this.state.mode === 'video') this._watchMhz(f, true);
-                else this._beginHold(lo, hi, f);
+                else this._beginHold(f);
             };
-            arm = { x: e.clientX, y: e.clientY, lo: slice[0], hi: slice[1], freq, timer: 0 };
+            arm = { x: e.clientX, y: e.clientY, freq, timer: 0 };
             this._chargeStart(e.clientX, e.clientY, rgb, ms, commit);
         });
         gl.addEventListener('pointermove', (e) => {
@@ -2420,7 +2442,36 @@ export class Ui {
         });
         gl.addEventListener('pointercancel', drop);
         gl.addEventListener('contextmenu', (e) => e.preventDefault());
-        $('hold-chip').onclick = () => this._endHold(true);
+        $('hold-resume').onclick = () => this._endHold(true);
+        $('hold-dn').onclick = (e) => {
+            e.stopPropagation();
+            if (!this._hold) return;
+            this._tuneHold(this._hold.freq - 1);
+        };
+        $('hold-up').onclick = (e) => {
+            e.stopPropagation();
+            if (!this._hold) return;
+            this._tuneHold(this._hold.freq + 1);
+        };
+        const input = $('hold-mhz');
+        const commitMhz = () => {
+            if (!this._hold) return;
+            const mhz = parseFloat(input.value);
+            if (Number.isFinite(mhz)) this._tuneHold(mhz);
+            else this._syncHoldUi();
+        };
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                input.blur();
+                commitMhz();
+            } else if (e.key === 'Escape') {
+                input.blur();
+                this._syncHoldUi();
+            }
+        });
+        input.addEventListener('change', commitMhz);
+        input.addEventListener('blur', commitMhz);
         $('hold-watch').onclick = (e) => {
             e.stopPropagation();
             if (!this._hold || !Number.isFinite(this._hold.freq)) return;
@@ -2603,7 +2654,7 @@ export class Ui {
         img.src = url;
     }
 
-    /* Ring at the press. Color and slice are fixed from the point under
+    /* Ring at the press. Color and bin are fixed from the point under
      * the cursor when the press started, and the sweep always takes `ms`. */
     _chargeStart(x, y, rgb, ms, onDone) {
         this._chargeStop();
