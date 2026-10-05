@@ -635,6 +635,7 @@ export class Ui {
         const opts = { passive: true, capture: true };
         document.addEventListener('pointerdown', (e) => {
             this._hintDrag = { x: e.clientX, y: e.clientY, dragging: false };
+            if (this.camMode) this._bumpHint();
         }, opts);
         document.addEventListener('pointermove', (e) => {
             const d = this._hintDrag;
@@ -658,8 +659,8 @@ export class Ui {
     _setHint(vis) {
         const el = $('hint');
         el.textContent = this.camMode
-            ? 'HOLD A CLUSTER TO DWELL'
-            : 'HOLD A CLUSTER    DRAG TO MOVE    SCROLL TO ZOOM';
+            ? 'TAP AND HOLD TO DWELL'
+            : 'TAP AND HOLD TO DWELL, DRAG TO MOVE, SCROLL TO ZOOM';
         if (vis && ($('freq-pop').classList.contains('open') ||
                     $('color-pop').classList.contains('open') ||
                     $('set-pop').classList.contains('open')))
@@ -2342,6 +2343,7 @@ export class Ui {
         }
         this._pushHold();
         this._syncHoldChip();
+        clearTimeout(this._hintTimer);
         this._setHint(false);
     }
 
@@ -2350,6 +2352,7 @@ export class Ui {
         if (!h) return;
         this._hold = null;
         this._syncHoldChip();
+        this._bumpHint();
         if (!restore) return;
         const s = h.saved;
         this.s.manualLo = s.manualLo;
@@ -2369,11 +2372,10 @@ export class Ui {
         /* A held mouse drifts. A tight slop cancelled the press before the
          * timer, so the ring never got to finish. */
         const slop = 36;
-        const ms = 900;
         let arm = null;
         const drop = () => {
             if (!arm) return;
-            clearTimeout(arm.timer);
+            if (arm.timer) clearTimeout(arm.timer);
             arm = null;
             this._chargeStop();
         };
@@ -2392,15 +2394,18 @@ export class Ui {
             if (!slice) return;
             const rgb = this.renderer.pointColor(hit.freq, hit.inten);
             const freq = hit.freq;
-            const timer = setTimeout(() => {
+            /* OS long-press haptic is ~500 ms. A 900 ms ring left the
+             * buzz mid-fill. Mouse has no haptic; keep the longer dwell. */
+            const ms = e.pointerType === 'touch' ? 500 : 900;
+            const commit = () => {
                 if (!arm || arm.release) return;
                 const lo = arm.lo, hi = arm.hi, f = arm.freq;
                 drop();
                 if (this.state && this.state.mode === 'video') this._watchMhz(f, true);
                 else this._beginHold(lo, hi, f);
-            }, ms);
-            arm = { x: e.clientX, y: e.clientY, lo: slice[0], hi: slice[1], freq, timer };
-            this._chargeStart(e.clientX, e.clientY, rgb, ms);
+            };
+            arm = { x: e.clientX, y: e.clientY, lo: slice[0], hi: slice[1], freq, timer: 0 };
+            this._chargeStart(e.clientX, e.clientY, rgb, ms, commit);
         });
         gl.addEventListener('pointermove', (e) => {
             if (!arm) return;
@@ -2600,7 +2605,7 @@ export class Ui {
 
     /* Ring at the press. Color and slice are fixed from the point under
      * the cursor when the press started, and the sweep always takes `ms`. */
-    _chargeStart(x, y, rgb, ms) {
+    _chargeStart(x, y, rgb, ms, onDone) {
         this._chargeStop();
         const el = $('hold-charge');
         const [r, g, b] = rgb;
@@ -2620,6 +2625,7 @@ export class Ui {
             const p = Math.min(1, (performance.now() - t0) / ms);
             paint(p);
             if (p < 1) this._chargeTimer = setTimeout(tick, 16);
+            else if (onDone) onDone();
         };
         this._chargeTimer = setTimeout(tick, 16);
     }
