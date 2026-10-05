@@ -2447,9 +2447,8 @@ export class Ui {
             if (!hit || !this._holdOk(hit.freq)) return;
             const rgb = this.renderer.pointColor(hit.freq, hit.inten);
             const freq = hit.freq;
-            /* OS long-press haptic is ~500 ms. A 900 ms ring left the
-             * buzz mid-fill. Mouse has no haptic; keep the longer dwell. */
-            const ms = e.pointerType === 'touch' ? 500 : 900;
+            /* Match the ~500 ms OS long-press haptic. */
+            const ms = 500;
             const commit = () => {
                 if (!arm || arm.release) return;
                 const f = arm.freq;
