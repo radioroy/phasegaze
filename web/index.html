@@ -11,11 +11,11 @@
 <style>
 :root {
     --bg: rgba(6, 8, 7, 0.88);
-    --pop: rgba(6, 8, 7, 0.42);
+    --pop: rgba(6, 8, 7, 0.66);
     --line: #232823;
-    --line-hi: #3c463c;
+    --line-hi: #6e7a6e;
     --txt: #b8c4b8;
-    --dim: #5c665c;
+    --dim: #b8c4b8;
     --acc: #b8c4b8;
     --acc-ink: #0c110c;
     --acc-soft: rgba(184, 196, 184, 0.28);
@@ -173,7 +173,8 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 #gain-thumb { position: absolute; left: 50%; width: 26px; height: 14px; margin-left: -13px;
     background: #0c110c; border: 1px solid var(--acc); }
 #gain-label { position: absolute; right: 38px; top: 50%; transform: translateY(-50%);
-    font-size: 10px; color: var(--dim); letter-spacing: 0.1em; white-space: nowrap; }
+    font-size: 10px; color: var(--dim); letter-spacing: 0.1em; white-space: nowrap;
+    text-shadow: 0 1px 2px #000; }
 
 /* ---------- HUD popovers ---------- */
 .hud-pop { position: absolute; top: 48px; left: 8px; z-index: 6;
@@ -224,7 +225,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     background: rgba(255,255,255,0.035); }
 .tier-row { position: absolute; left: 0; right: 0; height: 32px; }
 .tile { position: absolute; top: 2px; bottom: 2px; border: 1px solid var(--line-hi);
-    background: rgba(30,36,30,0.55); color: var(--dim); font-size: 8px;
+    background: rgba(30,36,30,0.72); color: var(--dim); font-size: 8px;
     display: flex; align-items: flex-end; justify-content: center; cursor: pointer;
     overflow: hidden; padding: 0 0 1px; letter-spacing: 0; line-height: 1;
     touch-action: none; }
@@ -410,7 +411,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 <div id="gain-wrap">
     <div id="gain-track"></div>
     <div id="gain-thumb"></div>
-    <div id="gain-label">RF GAIN</div>
+    <div id="gain-label">RF 45</div>
 </div>
 
 <!-- ============ FREQ popover ============ -->
@@ -538,6 +539,6 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     </div>
 </div>
 
-<script type="module" src="./app.js?v=pg95"></script>
+<script type="module" src="./app.js?v=pg97"></script>
 </body>
 </html>

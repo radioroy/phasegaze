@@ -132,6 +132,7 @@ static pthread_mutex_t g_cmd_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cmd_cv = PTHREAD_COND_INITIALIZER;
 static int g_cmd;
 static double g_cmd_mhz;
+static int g_cmd_snap;
 /* Sweep ceiling. A config edit or a lock measure sets it, and either
  * one stays inside 4480–6740. Spectrum bins stay on the full span. */
 static double g_hw_lo = HW_LO_MIN_MHZ;
@@ -286,6 +287,10 @@ static int on_control(const char *msg, size_t len, void *user)
             tuner_set_gain(apply_gain);
     } else if (strcmp(type, "video") == 0) {
         if (mg_json_get_num(json, "$.freq_mhz", &d) && d >= 1000.0 && d <= 8000.0) {
+            int snap = 1;
+            double snap_d;
+            if (mg_json_get_num(json, "$.snap", &snap_d))
+                snap = snap_d != 0;
             pthread_mutex_lock(&g_set.mtx);
             if (!g_lock_busy) {
                 g_video_mode = 1;
@@ -298,6 +303,7 @@ static int on_control(const char *msg, size_t len, void *user)
                 pthread_mutex_lock(&g_cmd_mtx);
                 g_cmd = 1;
                 g_cmd_mhz = d;
+                g_cmd_snap = snap;
                 pthread_cond_signal(&g_cmd_cv);
                 pthread_mutex_unlock(&g_cmd_mtx);
             }
@@ -1273,12 +1279,20 @@ int main(int argc, char **argv)
         }
         cmd = g_cmd;
         mhz = g_cmd_mhz;
+        int snap = g_cmd_snap;
         g_cmd = 0;
         pthread_mutex_unlock(&g_cmd_mtx);
         if (g_quit) break;
         if (cmd == 1) {
-            g_video_nudges = 0;
-            video_enter(video_snap_mhz(mhz));
+            /* A hold-bar step is the LO the user asked for. Snap and
+             * the discriminator walk would pull it back onto a channel. */
+            if (snap) {
+                g_video_nudges = 0;
+                video_enter(video_snap_mhz(mhz));
+            } else {
+                g_video_nudges = 2;
+                video_enter(mhz);
+            }
         } else if (cmd == 2)
             video_leave();
         if (g_video_on && g_video_nudges < 2) {

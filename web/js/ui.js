@@ -1171,7 +1171,14 @@ export class Ui {
         const s = this._snapMhz(mhz, snap);
         if (!(s.mhz >= 1000 && s.mhz <= 8000)) return;
         this._vidClosed = false;
-        this.net.send({ type: 'video', freq_mhz: s.mhz });
+        this.net.send({ type: 'video', freq_mhz: s.mhz, snap: snap ? 1 : 0 });
+        if (this._hold) {
+            const f = this._holdMhz(s.mhz);
+            if (f !== this._hold.freq) {
+                this._hold.freq = f;
+                this._syncHoldUi();
+            }
+        }
     }
 
     _syncNtscWatch() {
@@ -2336,6 +2343,10 @@ export class Ui {
         row.classList.add('show');
     }
 
+    _watching() {
+        return !!(this.state && this.state.mode === 'video');
+    }
+
     _tuneHold(mhz) {
         if (!this._hold || !Number.isFinite(mhz)) return;
         const f = this._holdMhz(mhz);
@@ -2344,7 +2355,8 @@ export class Ui {
             return;
         }
         this._hold.freq = f;
-        this._pushHold();
+        if (this._watching()) this._watchMhz(f, false);
+        else this._pushHold();
         this._syncHoldUi();
     }
 
@@ -2376,6 +2388,8 @@ export class Ui {
         this._hold = null;
         this._syncHoldUi();
         this._bumpHint();
+        if (this._watching() || this._vidMhz != null)
+            this._stopVideo();
         if (!restore) return;
         const s = h.saved;
         this.s.manualLo = s.manualLo;
@@ -2502,13 +2516,8 @@ export class Ui {
         bar.addEventListener('pointercancel', end);
         $('vid-close').onclick = (e) => {
             e.stopPropagation();
-            this._vidClosed = true;
-            this._vidGot = false;
-            this._vidErrHold = '';
-            win.classList.remove('show');
-            this._dropVidUrl();
-            this.renderer.clearAim();
-            this.net.send({ type: 'video_stop' });
+            this._stopVideo();
+            if (this._hold) this._pushHold();
         };
         const input = $('ntsc-mhz');
         input.addEventListener('input', () => this._syncNtscWatch());
@@ -2533,6 +2542,17 @@ export class Ui {
         this._vidPrevUrl = null;
         const img = $('vid-img');
         if (img) img.style.display = 'none';
+    }
+
+    _stopVideo() {
+        this._vidClosed = true;
+        this._vidGot = false;
+        this._vidErrHold = '';
+        const win = $('vid-win');
+        if (win) win.classList.remove('show');
+        this._dropVidUrl();
+        this.renderer.clearAim();
+        this.net.send({ type: 'video_stop' });
     }
 
     _dropVidUrl() {
@@ -2585,6 +2605,13 @@ export class Ui {
             this._vidErrHold = '';
             win.classList.add('show');
             this._vidTitle(st.video_mhz);
+            if (this._hold && Number.isFinite(st.video_mhz)) {
+                const f = this._holdMhz(st.video_mhz);
+                if (f !== this._hold.freq) {
+                    this._hold.freq = f;
+                    this._syncHoldUi();
+                }
+            }
             if (!this._vidGot)
                 this._vidMsg((st.video_err || 'TUNING').toUpperCase());
             return;
@@ -2800,16 +2827,14 @@ export class Ui {
                 ? 'Decoder AGC is running. This slider returns with the sweep.'
                 : '';
         }
-        const gainLab = $('gain-label');
-        if (gainLab) gainLab.textContent = st.mode === 'video' ? 'AGC' : 'RF GAIN';
         this._syncVideo(st);
-        if (!this._gainDraggingRef()) {
+        if (st.mode === 'video') {
+            $('gain-label').textContent = 'AGC';
+        } else if (!this._gainDraggingRef()) {
             // don't fight the user's finger; adopt backend gain otherwise
             const g = Math.max(0, Math.min(RF_GAIN_MAX, st.gain | 0));
-            if (g !== this.s.hwGain) {
-                this.s.hwGain = g;
-                this._layoutGain();
-            }
+            if (g !== this.s.hwGain) this.s.hwGain = g;
+            this._layoutGain();
         }
     }
 
