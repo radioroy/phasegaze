@@ -100,6 +100,13 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     width: min(440px, calc(100vw - 56px)); background: #000;
     border: 1px solid var(--line-hi); }
 #vid-win.show { display: block; }
+#aim-x { position: absolute; z-index: 12; width: 18px; height: 18px;
+    margin: -9px 0 0 -9px; pointer-events: none; display: none; }
+#aim-x.on { display: block; }
+#aim-x i { position: absolute; left: 8px; top: 0; width: 2px; height: 18px;
+    background: #f2f6f2; box-shadow: 0 0 0 1px rgba(0,0,0,0.7); }
+#aim-x i:first-child { transform: rotate(45deg); }
+#aim-x i:last-child { transform: rotate(-45deg); }
 #vid-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
     background: var(--bg); border-bottom: 1px solid var(--line); cursor: grab;
     touch-action: none; }
@@ -330,6 +337,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     <button type="button" id="hold-chip" title="Resume the sweep"></button>
     <button type="button" id="hold-watch" title="Decode this carrier">WATCH</button>
 </div>
+<div id="aim-x"><i></i><i></i></div>
 <div id="vid-win">
     <div id="vid-bar">
         <span id="vid-title">VIDEO</span>
@@ -503,6 +511,6 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     </div>
 </div>
 
-<script type="module" src="./app.js?v=pg88"></script>
+<script type="module" src="./app.js?v=pg91"></script>
 </body>
 </html>

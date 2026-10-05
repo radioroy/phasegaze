@@ -22,6 +22,7 @@ const _qA = new THREE.Quaternion();
 const _qFwd = new THREE.Quaternion();
 const _qYaw = new THREE.Quaternion();
 const _qPitch = new THREE.Quaternion();
+const _aimClip = new THREE.Vector4();
 
 // Reciprocal lattice basis (see phasegaze rf_math.js).
 const R1X = 4 * Math.PI / Math.sqrt(3);
@@ -161,6 +162,21 @@ void main() {
     gl_Position = vec4(mix(ndcAR, ndcS, uMorph), 1.0);
     gl_PointSize = sz;
     vColor = vec4(col, alpha);
+}
+`;
+
+/* One reticle, not a stamp. Same projection as the point cloud so it
+ * sits on the hemisphere and on the camera view. */
+const MARK_FS = /* glsl */`
+precision mediump float;
+void main() {
+    vec2 p = gl_PointCoord - vec2(0.5);
+    float d = abs(abs(p.x) - abs(p.y));
+    float arm = smoothstep(0.09, 0.04, d);
+    float disk = smoothstep(0.50, 0.40, length(p));
+    float a = arm * disk;
+    if (a < 0.04) discard;
+    gl_FragColor = vec4(0.94, 0.97, 0.94, a);
 }
 `;
 
@@ -379,6 +395,7 @@ export class VrfRenderer {
         this._fps = 0; this._lastT = 0;
 
         this._buildPoints();
+        this._buildAim();
         this._buildShell();
 
         window.addEventListener('resize', () => this._resize());
@@ -467,6 +484,117 @@ export class VrfRenderer {
         mkDraw(0, 0, -1);
         for (const [ox, oy] of this.mirrorOffs) { mkDraw(ox, oy, 1); mkDraw(ox, oy, -1); }
         this._updateDrawPool();
+    }
+
+    _buildAim() {
+        const geo = new THREE.BufferGeometry();
+        this.aimGrad = new THREE.BufferAttribute(new Float32Array(2), 2);
+        this.aimAux = new THREE.BufferAttribute(new Float32Array(4), 4);
+        this.aimQuat = new THREE.BufferAttribute(new Float32Array([0, 0, 0, 1]), 4);
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3), 3));
+        geo.setAttribute('aGrad', this.aimGrad);
+        geo.setAttribute('aAux', this.aimAux);
+        geo.setAttribute('aQuat', this.aimQuat);
+        geo.setDrawRange(0, 1);
+
+        const share = this.pointUniforms;
+        this.aimUniforms = {
+            uNow: share.uNow, uDecayTau: share.uDecayTau, uStampWindow: share.uStampWindow,
+            uGain: share.uGain,
+            uPointSize: { value: 26 }, uPixelRatio: share.uPixelRatio,
+            uPulse: { value: 0 },
+            uMorph: share.uMorph, uFlipX: share.uFlipX, uFlipW: { value: 1 },
+            uSfK: share.uSfK, uExtrap: share.uExtrap,
+            uMirror: { value: new THREE.Vector2(0, 0) },
+            uQuatView: share.uQuatView,
+            uC0: share.uC0, uC1: share.uC1, uC2: share.uC2, uC3: share.uC3,
+            uColorMode: share.uColorMode,
+            uLut: share.uLut, uFreqT: share.uFreqT, uChanMap: share.uChanMap,
+            uFreqLo: share.uFreqLo, uFreqHi: share.uFreqHi,
+            uTargetFreq: share.uTargetFreq, uTargetWidth: share.uTargetWidth,
+        };
+        const mat = new THREE.ShaderMaterial({
+            uniforms: this.aimUniforms,
+            vertexShader: POINT_VS,
+            fragmentShader: MARK_FS,
+            transparent: true,
+            depthTest: false,
+            depthWrite: false,
+        });
+        this.aimMesh = new THREE.Points(geo, mat);
+        this.aimMesh.frustumCulled = false;
+        this.aimMesh.renderOrder = 4;
+        this.aimMesh.visible = false;
+        this.aimOn = false;
+        this._aimEl = document.getElementById('aim-x');
+        this.scene.add(this.aimMesh);
+    }
+
+    /* (u, v) are the same direction cosines as a sweep point. */
+    setAim(u, v, freq) {
+        const sf = SF_PER_MHZ * freq;
+        this.aimGrad.setXY(0, u * sf, v * sf);
+        this.aimAux.setX(0, freq);
+        this.aimAux.setY(0, 1);
+        this.aimOn = true;
+    }
+
+    clearAim() {
+        this.aimOn = false;
+        if (this.aimMesh) this.aimMesh.visible = false;
+        if (this._aimEl) this._aimEl.classList.remove('on');
+    }
+
+    /* Screen X, above the video window. The canvas sits under that
+     * window, so a point drawn there is covered whenever the target
+     * is in the lower-left of the hemisphere. */
+    _placeAim() {
+        const el = this._aimEl;
+        if (!el) return;
+        if (!this.aimOn) { el.classList.remove('on'); return; }
+        const freq = this.aimAux.getX(0);
+        const sf = SF_PER_MHZ * freq;
+        const g = this.aimGrad.array;
+        const uvx = g[0] / sf, uvy = g[1] / sf;
+        const r2 = uvx * uvx + uvy * uvy;
+        if (!(sf > 0) || r2 > 1) { el.classList.remove('on'); return; }
+        const aq = this.aimQuat.array;
+        const world = qrot(aq[0], aq[1], aq[2], aq[3], uvx, uvy, Math.sqrt(1 - r2));
+        const qv = this.pointUniforms.uQuatView.value;
+        const now = qrot(qv.x, qv.y, qv.z, qv.w, world[0], world[1], world[2]);
+        const u = this.pointUniforms;
+        const extrap = u.uExtrap.value;
+        let tx = now[0] * u.uFlipX.value * 0.5 + 0.5;
+        let ty = 0.5 - now[1] * 0.5;
+        tx = (tx - 0.5) * extrap + 0.5;
+        ty = (ty - 0.5) * extrap + 0.5;
+        const c0 = u.uC0.value, c1 = u.uC1.value, c2 = u.uC2.value, c3 = u.uC3.value;
+        const topx = c0.x + (c1.x - c0.x) * tx, topy = c0.y + (c1.y - c0.y) * tx;
+        const botx = c3.x + (c2.x - c3.x) * tx, boty = c3.y + (c2.y - c3.y) * tx;
+        const spx = topx + (botx - topx) * ty, spy = topy + (boty - topy) * ty;
+        const ndcARx = spx * 2 - 1, ndcARy = 1 - spy * 2;
+
+        this.camera.updateMatrixWorld();
+        _aimClip.set(world[0] * 1.005, world[1] * 1.005, world[2] * 1.005, 1);
+        _aimClip.applyMatrix4(this.camera.matrixWorldInverse);
+        _aimClip.applyMatrix4(this.camera.projectionMatrix);
+        const m = this.morph;
+        if ((now[2] < 0 && m < 0.02) || (_aimClip.w <= 0 && m > 0.5)) {
+            el.classList.remove('on');
+            return;
+        }
+        const ndcX = ndcARx + ( _aimClip.x / _aimClip.w - ndcARx) * m;
+        const ndcY = ndcARy + ( _aimClip.y / _aimClip.w - ndcARy) * m;
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        const x = (ndcX * 0.5 + 0.5) * rect.width;
+        const y = (-ndcY * 0.5 + 0.5) * rect.height;
+        if (x < -30 || y < -30 || x > rect.width + 30 || y > rect.height + 30) {
+            el.classList.remove('on');
+            return;
+        }
+        el.style.left = x.toFixed(1) + 'px';
+        el.style.top = y.toFixed(1) + 'px';
+        el.classList.add('on');
     }
 
     _updateDrawPool() {
@@ -999,8 +1127,18 @@ export class VrfRenderer {
         this._stampT = tNow;
         this.pointUniforms.uNow.value = tNow;
         this.pointUniforms.uStampWindow.value = Math.max(gap, 1e-4);
+        /* Birth tracks the clock so stamp-mode decay does not drop the
+         * reticle after one paint. Direction is the device frame now. */
+        if (this.aimOn) {
+            this.aimAux.setZ(0, tNow);
+            if (this.imuEnabled) {
+                const q = this.imuQuat;
+                this.aimQuat.setXYZW(0, q.x, q.y, q.z, q.w);
+            }
+        }
         this._stampDrawRange();
         this.renderer.render(this.scene, this.camera);
+        this._placeAim();
         this._fresh = 0;
     }
 

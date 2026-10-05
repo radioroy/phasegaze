@@ -2451,6 +2451,7 @@ export class Ui {
             this._vidErrHold = '';
             win.classList.remove('show');
             this._dropVidUrl();
+            this.renderer.clearAim();
             this.net.send({ type: 'video_stop' });
         };
         const input = $('ntsc-mhz');
@@ -2502,9 +2503,14 @@ export class Ui {
             if (this._vidClosed) return;
             if (st.video_mhz !== this._vidMhz) {
                 this._vidMhz = st.video_mhz;
-                this._vidGot = false;
-                this._dropVidUrl();
-                $('vid-fps').textContent = '';
+                /* A recenter restarts the decoder and the MHz changes.
+                 * Dropping the frame here puts TUNING back over a picture
+                 * that was already up, for as long as the new pipeline
+                 * takes to emit. Keep the last frame until the next one. */
+                if (!this._vidGot) {
+                    this._dropVidUrl();
+                    $('vid-fps').textContent = '';
+                }
             }
             this._vidErrHold = '';
             win.classList.add('show');
@@ -2519,6 +2525,7 @@ export class Ui {
             win.classList.add('show');
             this._vidMsg(st.video_err.toUpperCase());
             $('vid-fps').textContent = '';
+            this.renderer.clearAim();
             return;
         }
         if (!this._vidErrHold) {
@@ -2527,6 +2534,7 @@ export class Ui {
             this._vidMhz = null;
             this._dropVidUrl();
         }
+        this.renderer.clearAim();
     }
 
     onVideoFrame(header, u8) {
@@ -2534,6 +2542,11 @@ export class Ui {
         if (!(this.state && this.state.mode === 'video')) return;
         this._vidFps = header.fps || 0;
         this._vidGot = true;
+        const au = header.loEnd, av = header.aimV;
+        if (Number.isFinite(au) && Number.isFinite(av) && au * au + av * av <= 1)
+            this.renderer.setAim(au, av, header.loStart || 0);
+        else
+            this.renderer.clearAim();
         $('vid-fps').textContent = this._vidFps ? `${this._vidFps.toFixed(0)} FPS` : '';
         this._vidMsg('');
         const copy = u8.slice();

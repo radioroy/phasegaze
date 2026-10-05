@@ -34,10 +34,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
+#include <linux/types.h>
+#include "fpga_csi.h"
+
+#include "dsp.h"
 #include "pg_stream.h"
 #include "server.h"
 
@@ -57,9 +62,17 @@ static int             g_reader_alive;
 static double          g_mhz;
 static uint32_t        g_seq;
 static uint32_t        g_frames;
+static atomic_int      g_pict;
 static atomic_int      g_want_mhz;
 static pthread_t       g_steer;
 static int             g_steer_alive;
+static pthread_t       g_phase;
+static int             g_phase_alive;
+/* Smoothed direction cosines from the autosteer shifters. ok is 0 until
+ * a solve lands on the disk. */
+static atomic_uint     g_aim_u;
+static atomic_uint     g_aim_v;
+static atomic_int      g_aim_ok;
 
 /* Same carriers as web/js/ntsc.js. A hemisphere hit is an FFT bin, not
  * the channel. 12 MHz is inside the FM skirt and short of the next
@@ -176,10 +189,21 @@ static void publish_jpeg(const uint8_t *jpg, size_t n, float fps)
     h->type = PG_FRAME_VIDEO;
     h->count = (uint32_t)n;
     h->lo_start = (float)g_mhz;
-    h->lo_end = 0;
     h->fps = fps;
     h->seq = g_seq++;
+    /* lo_end / reserved carry the autosteer direction. 2 is off the disk,
+     * which the page treats as "no mark". */
+    h->lo_end = 2.f;
     h->reserved = 0;
+    if (atomic_load(&g_aim_ok)) {
+        uint32_t bu = atomic_load(&g_aim_u);
+        uint32_t bv = atomic_load(&g_aim_v);
+        float u, v;
+        memcpy(&u, &bu, sizeof u);
+        memcpy(&v, &bv, sizeof v);
+        h->lo_end = u;
+        memcpy(&h->reserved, &v, sizeof v);
+    }
     memcpy(buf + sizeof(pg_hdr_t), jpg, n);
     server_publish(SERVER_SLOT_VIDEO, buf, need);
     free(heap);
@@ -199,6 +223,7 @@ static void *reader_main(void *arg)
     uint32_t fps_n = 0;
     uint64_t fps_t0 = 0;
     uint64_t log_t = mono_ns();
+    uint64_t t_arm = log_t;
 
     while (!atomic_load(&g_stop)) {
         if (len >= JPG_MAX) {
@@ -210,7 +235,14 @@ static void *reader_main(void *arg)
             if (errno == EINTR) continue;
             break;
         }
-        if (pr == 0) continue;
+        if (pr == 0) {
+            /* Off-carrier the decoder can emit nothing. Without a
+             * deadline the window stays on TUNING and the pipeline
+             * never looks dead. */
+            if (g_frames == 0 && mono_ns() - t_arm > 2500000000ull)
+                break;
+            continue;
+        }
         ssize_t n = read(fd, acc + len, JPG_MAX - len);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -254,6 +286,7 @@ static void *reader_main(void *arg)
                     log_t = t;
                 }
                 g_frames++;
+                atomic_store(&g_pict, 1);
             }
             off = i + 2;
         }
@@ -324,8 +357,15 @@ static void *steer_main(void *arg)
         }
         if (fabs(off) < 0.8)
             return NULL;
-        if (have && wall > prev_wall + 0.2 &&
-            copysign(1.0, off) == copysign(1.0, prev) && fabs(off - prev) < 0.4) {
+        /* A couple of MHz is the next channel. The decoder then rejects
+         * fields and ffmpeg would otherwise sit with nothing to send.
+         * One sample is enough; the two-sample check stays for a smaller
+         * offset, where one APL kick looks like a real error. */
+        int commit = fabs(off) >= 1.2;
+        if (!commit && have && wall > prev_wall + 0.2 &&
+            copysign(1.0, off) == copysign(1.0, prev) && fabs(off - prev) < 0.4)
+            commit = 1;
+        if (commit) {
             int neu = (int)lround(origin + off);
             int cur = (int)lround(origin);
             if (neu >= 4900 && neu <= 6000 && neu != cur && abs(neu - cur) <= 4)
@@ -348,11 +388,150 @@ int video_steer_take(double *mhz)
     return 1;
 }
 
+/* 0x2A/0x2B are the RX phase shifters, one byte per antenna.
+ * degrees = byte * 360/256. High byte of 0x2A is antenna 0 and stays 0
+ * (the reference); then low 0x2A, high 0x2B, low 0x2B. The shifter
+ * cancels the path, so the arrival phase the sweep solves is the
+ * negative of the commanded phase. Spacing matches hop.c. */
+#define AIM_PHASE_STEP (6.283185307179586f / 256.0f)
+#define AIM_SCALE(f) (2.0f * 3.14159265358979f * (0.0455f / 299.792458f) * (f))
+
+static void aim_store(float u, float v, int ok)
+{
+    uint32_t bu, bv;
+    memcpy(&bu, &u, sizeof u);
+    memcpy(&bv, &v, sizeof v);
+    atomic_store(&g_aim_u, bu);
+    atomic_store(&g_aim_v, bv);
+    atomic_store(&g_aim_ok, ok);
+}
+
+static int phase_fd_open(void)
+{
+    int fd = open("/dev/csi_stream0", O_RDWR | O_NONBLOCK);
+    if (fd < 0)
+        return -1;
+    /* Register reads only. mmap of this node splits the CSI ring with
+     * the demod, so this fd never maps it. */
+    if (ioctl(fd, CSI_IOC_JTAG_SETUP) != 0) {
+        close(fd);
+        return -1;
+    }
+    uint64_t t0 = mono_ns();
+    while (ioctl(fd, CSI_IOC_JTAG_ACQUIRE_LEASE) != 0) {
+        if (errno != EBUSY || mono_ns() - t0 > 500000000ull) {
+            close(fd);
+            return -1;
+        }
+        usleep(2000);
+    }
+    return fd;
+}
+
+static void *phase_main(void *arg)
+{
+    (void)arg;
+    /* The demod's device open runs quadrf-jtag when a channel name is
+     * set. Taking the lease first makes that throw and the picture
+     * never starts. Wait until a JPEG is flowing. */
+    for (int i = 0; i < 200 && !atomic_load(&g_stop) && !atomic_load(&g_pict); i++)
+        usleep(20000);
+    if (atomic_load(&g_stop) || !atomic_load(&g_pict))
+        return NULL;
+    int fd = phase_fd_open();
+    if (fd < 0) {
+        fprintf(stderr, "phasegaze: aim off\n");
+        return NULL;
+    }
+    float su = 0, sv = 0;
+    int primed = 0, logged = 0, miss = 0;
+    uint64_t t_prev = mono_ns();
+    while (!atomic_load(&g_stop)) {
+        struct csi_jtag_reg r = { .addr = 0x2A };
+        uint16_t ra = 0, rb = 0;
+        int bad = ioctl(fd, CSI_IOC_JTAG_REG_READ, &r) != 0;
+        if (!bad) {
+            ra = r.value;
+            r.addr = 0x2B;
+            r.value = 0;
+            bad = ioctl(fd, CSI_IOC_JTAG_REG_READ, &r) != 0;
+            rb = r.value;
+        }
+        uint64_t now = mono_ns();
+        float dt = (float)(now - t_prev) * 1e-9f;
+        t_prev = now;
+        if (dt < 0.001f) dt = 0.001f;
+        if (dt > 0.2f) dt = 0.2f;
+
+        if (!bad) {
+            float p0 = (float)(ra >> 8) * AIM_PHASE_STEP;
+            float p1 = (float)(ra & 255) * AIM_PHASE_STEP;
+            float p2 = (float)(rb >> 8) * AIM_PHASE_STEP;
+            float p3 = (float)(rb & 255) * AIM_PHASE_STEP;
+            float gx, gy;
+            /* max_cost 8 keeps the lattice search. The shifters do not
+             * close as tightly as the sweep's pair-averaged phases, and
+             * a smaller cap returns boresight. */
+            float cost = dsp_solve_gradient(remainderf(-(p1 - p0), 6.283185307179586f),
+                                            remainderf(-(p2 - p0), 6.283185307179586f),
+                                            remainderf(-(p3 - p0), 6.283185307179586f),
+                                            8.0f, &gx, &gy);
+            float scale = AIM_SCALE((float)g_mhz);
+            float u = 0, v = 0;
+            int ok = cost <= 8.0f && scale > 1.0f;
+            if (ok) {
+                u = gx / scale;
+                v = gy / scale;
+                float r2 = u * u + v * v;
+                if (r2 > 1.0f) {
+                    if (r2 > 1.32f)
+                        ok = 0;
+                    else {
+                        float inv = 0.999f / sqrtf(r2);
+                        u *= inv;
+                        v *= inv;
+                    }
+                }
+            }
+            if (ok) {
+                /* ~1 LSB of dither every read. 40 ms kills that without
+                 * lagging a hand moving the transmitter. */
+                if (!primed) {
+                    su = u;
+                    sv = v;
+                    primed = 1;
+                } else {
+                    float a = 1.0f - expf(-dt / 0.04f);
+                    su += a * (u - su);
+                    sv += a * (v - sv);
+                }
+                aim_store(su, sv, 1);
+                miss = 0;
+                if (!logged) {
+                    fprintf(stderr, "phasegaze: aim u %+.2f v %+.2f\n", su, sv);
+                    logged = 1;
+                }
+            } else if (++miss > 15) {
+                primed = 0;
+                aim_store(0, 0, 0);
+            }
+        }
+        /* A pair of register reads is ~350 us. 16 ms is ~60 Hz, which
+         * is already faster than the 30 fps picture. */
+        usleep(16000);
+    }
+    ioctl(fd, CSI_IOC_JTAG_RELEASE_LEASE);
+    close(fd);
+    return NULL;
+}
+
 int video_pipeline_start(double freq_mhz)
 {
     atomic_store(&g_stop, 0);
     atomic_store(&g_dead, 0);
     atomic_store(&g_want_mhz, 0);
+    atomic_store(&g_pict, 0);
+    aim_store(0, 0, 0);
     g_frames = 0;
     g_mhz = freq_mhz;
     set_err("");
@@ -384,11 +563,21 @@ int video_pipeline_start(double freq_mhz)
         "--args", "numBuffers=2,bufferLength=65536",
         "--sat", "1.0",
         "--stdout",
+        /* The demod's own default for --ch is the raceband channel R5
+         * (5806 MHz). Any channel name makes it call Soapy
+         * setFrequency, and that runs the MAX2851 automatic VCO
+         * search, which does not finish. The PLL set_lo just locked
+         * would drop. An empty name skips the retune. */
+        "--ch", "",
         NULL
     };
-    /* 480x360 qscale 8 at 30 fps. The demod's raster is 59.94 fps; shipping
-     * every field is ~2x the bytes for a window. Snow is ~50 KB, a real
-     * picture much less, so 30 fps stays a few megabits on the AP. */
+    /* 480x360 qscale 8, at most 30 fps. The demod's raster is 59.94 fps;
+     * shipping every field is ~2x the bytes for a window. Snow is ~50 KB,
+     * a real picture much less, so 30 fps stays a few megabits on the AP.
+     * fps=30 holds each frame until the next arrives, so a decoder that
+     * only gets one field out (off-carrier, short fields) never produces
+     * a JPEG and the window stays on TUNING. select lets the first frame
+     * through, then one every 33 ms of the 59.94 fps timestamps. */
     char *ff_argv[] = {
         "/usr/bin/ffmpeg",
         "-hide_banner", "-loglevel", "error",
@@ -402,7 +591,8 @@ int video_pipeline_start(double freq_mhz)
         "-i", "pipe:0",
         "-an",
         "-threads", "1",
-        "-vf", "fps=30,scale=480:360:flags=fast_bilinear,format=yuvj420p",
+        "-vf", "select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,0.033)',scale=480:360:flags=fast_bilinear,format=yuvj420p",
+        "-fps_mode", "passthrough",
         "-q:v", "8",
         "-flush_packets", "1",
         "-f", "mjpeg",
@@ -436,6 +626,10 @@ int video_pipeline_start(double freq_mhz)
         g_steer_alive = 0;
     else
         g_steer_alive = 1;
+    if (pthread_create(&g_phase, NULL, phase_main, NULL) != 0)
+        g_phase_alive = 0;
+    else
+        g_phase_alive = 1;
     return 0;
 
 fail:
@@ -458,6 +652,11 @@ fail:
 void video_pipeline_stop(void)
 {
     atomic_store(&g_stop, 1);
+    if (g_phase_alive) {
+        pthread_join(g_phase, NULL);
+        g_phase_alive = 0;
+    }
+    aim_store(0, 0, 0);
     if (g_steer_alive) {
         pthread_join(g_steer, NULL);
         g_steer_alive = 0;
