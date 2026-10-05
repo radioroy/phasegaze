@@ -62,6 +62,13 @@ int  csi_dev_lo_switches_band(const csi_dev_t *d, double freq_mhz);
 /* Program the synthesizer to freq_mhz (batched, ~atomic). */
 int  csi_dev_set_lo(csi_dev_t *d, double freq_mhz);
 
+/* Summed antennas, 12 MHz digital channel, AGC at -14 dBFS, autosteer
+ * on, test tone off. Call after set_lo: a gain restrobe clears the AGC
+ * bit. Leaves the synth words alone. Soapy's setFrequency uses the
+ * chip's automatic VCO search, which does not finish, so the camera
+ * path tunes with set_lo and must not retune through Soapy. */
+int  csi_dev_video_front_end(csi_dev_t *d);
+
 /* Manual RX gain in dB. FPGA 0x6A is the total-gain word the fabric splits
  * into LNA+VGA+digital. Same 0..63 range as quadrf-jtag / the web UI. */
 int  csi_dev_set_gain(csi_dev_t *d, int gain);

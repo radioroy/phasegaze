@@ -1,6 +1,8 @@
 // ui.js — FREQ / COLOR / CONF panels, gain slider, fps line.
 
 import { WIFI_TIERS, WIFI_VIEWS, WIFI_F0, WIFI_F1, WIFI_HOP_BANDS, WIFI_GAP } from './wifi.js?v=pg75';
+import { NTSC_CHANNELS, NTSC_ROWS, NTSC_BASE_MHZ, NTSC_F0, NTSC_F1,
+    NTSC_SCAN, ntscById, ntscChannelSpan, ntscTrapPoints } from './ntsc.js?v=pg79';
 import { SCHEMES, schemeCss, lutRgb } from './colors.js';
 import { Cam } from './cam.js';
 import { applyDrag, defaultCorners, sanitizeCorners, unmapPoint } from './cal.js';
@@ -85,7 +87,7 @@ const DEFAULTS = {
     fft: true, fftSpeed: 'fast', fftAgc: true,
     hwGain: 45,
     manualLo: HW_MIN, manualHi: HW_MAX,
-    wifiSel: [], wifiView: '5',
+    wifiSel: [], wifiView: '5', ntscSel: [],
     accent: ACCENT_DEFAULT,
     corners: defaultCorners(),
 };
@@ -150,11 +152,12 @@ export class Ui {
         if (typeof this.s.freqPin !== 'boolean') this.s.freqPin = true;
         if (typeof this.s.mirrors !== 'boolean') this.s.mirrors = true;
         if (typeof this.s.rings !== 'boolean') this.s.rings = false;
-        if (this.s.freqTab !== 'wifi') this.s.freqTab = 'range';
+        if (this.s.freqTab !== 'wifi' && this.s.freqTab !== 'ntsc') this.s.freqTab = 'range';
         if (!WIFI_COLOR.includes(this.s.wifiColor))
             this.s.wifiColor = this.s.wifiChan === true ? 'chan' : 'band';
         delete this.s.wifiChan;
         this.s.wifiSel = sanitizeWifiSel(this.s.wifiSel);
+        this.s.ntscSel = sanitizeNtscSel(this.s.ntscSel);
         if (!WIFI_VIEWS.some(v => v.id === this.s.wifiView)) this.s.wifiView = '5';
         this.s.corners = sanitizeCorners(this.s.corners);
 
@@ -199,6 +202,7 @@ export class Ui {
         this.calOn = false;
         this._camHideTimer = null;
         this._revealTap = false;
+        this._hold = null;
         this.cam = new Cam($('cam-feed'));
 
         this._selectFreqTab = null;
@@ -210,6 +214,8 @@ export class Ui {
         this._bindManual();
         this._bindSettings();
         this._bindPointer();
+        this._bindHold();
+        this._bindVideo();
         this._bindHint();
         this._bindCal();
         this._bindCamFade();
@@ -322,8 +328,10 @@ export class Ui {
     pushBackend() {
         this.net.set({ gain: this.s.hwGain, output_fraction: this.s.density / 100,
             spectrum: this.s.fft ? 1 : 0, ...this._gateMsg() });
-        if (this.s.scheme === 'target') this._applyTargetSweep(true);
+        if (this._hold) this._pushHold();
+        else if (this.s.scheme === 'target') this._applyTargetSweep(true);
         else if (this._freqTab === 'wifi') this._commitWifiSel();
+        else if (this._freqTab === 'ntsc') this._commitNtscSel();
         else this._applyManualRange(true);
     }
 
@@ -398,7 +406,7 @@ export class Ui {
             this.cam.stop();
             this._setCal(false);
         }
-        this._setHint(false);
+        this._setHint(true);
         this._syncModeUi();
         this._bumpControls();
     }
@@ -648,12 +656,15 @@ export class Ui {
     }
 
     _setHint(vis) {
-        if (vis && this.camMode) return;   // orbit/zoom hint means nothing in AR
+        const el = $('hint');
+        el.textContent = this.camMode
+            ? 'HOLD A CLUSTER TO DWELL'
+            : 'HOLD A CLUSTER    DRAG TO MOVE    SCROLL TO ZOOM';
         if (vis && ($('freq-pop').classList.contains('open') ||
                     $('color-pop').classList.contains('open') ||
                     $('set-pop').classList.contains('open')))
             return;
-        $('hint').classList.toggle('show', vis);
+        el.classList.toggle('show', vis);
     }
 
     // ==================================================================
@@ -780,6 +791,8 @@ export class Ui {
         if (!this.s.fft) return;
         if (this._freqTab === 'wifi')
             $('freq-wifi').appendChild(block);
+        else if (this._freqTab === 'ntsc')
+            $('freq-ntsc').insertBefore(block, $('ntsc-chart'));
         else
             $('freq-range').insertBefore(block, $('manual-wrap'));
         this._drawFft();
@@ -831,6 +844,7 @@ export class Ui {
             inner.appendChild(row);
         });
         this._layoutWifi();
+        this._buildNtsc();
 
         const selectTab = (tid, apply) => {
             const prev = this._freqTab;
@@ -838,12 +852,17 @@ export class Ui {
             this.s.freqTab = tid;
             $('ftab-range').classList.toggle('on', tid === 'range');
             $('ftab-wifi').classList.toggle('on', tid === 'wifi');
+            $('ftab-ntsc').classList.toggle('on', tid === 'ntsc');
             $('freq-range').style.display = tid === 'range' ? '' : 'none';
             $('freq-wifi').style.display = tid === 'wifi' ? '' : 'none';
+            $('freq-ntsc').style.display = tid === 'ntsc' ? '' : 'none';
             if (tid === 'wifi') {
                 this._restoreWifiTiles();
                 this._commitWifiSel();
-            } else if (apply !== false && prev === 'wifi') {
+            } else if (tid === 'ntsc') {
+                this._restoreNtsc();
+                this._commitNtscSel();
+            } else if (apply !== false && (prev === 'wifi' || prev === 'ntsc')) {
                 this._applyManualRange(true);
             } else {
                 this._syncFreqColor();
@@ -853,6 +872,7 @@ export class Ui {
         };
         $('ftab-range').onclick = () => { selectTab('range'); this.save(); };
         $('ftab-wifi').onclick = () => { selectTab('wifi'); this.save(); };
+        $('ftab-ntsc').onclick = () => { selectTab('ntsc'); this.save(); };
         this._selectFreqTab = selectTab;
         $('btn-fft').onclick = (e) => {
             e.stopPropagation();
@@ -918,6 +938,7 @@ export class Ui {
     }
 
     _commitWifiSel() {
+        this._noteSweepEdit();
         const sel = [...document.querySelectorAll('#wifi-tiers .tile.on')]
             .map(el => [parseFloat(el.dataset.f0), parseFloat(el.dataset.f1)]);
         this.s.wifiSel = sel;
@@ -997,7 +1018,225 @@ export class Ui {
     }
 
     _applyWifiScan() {
+        this._noteSweepEdit();
         this.net.set({ lo_start: WIFI_F0, lo_end: WIFI_F1, bands: WIFI_HOP_BANDS });
+    }
+
+    _buildNtsc() {
+        const chart = $('ntsc-chart');
+        const pts = ntscTrapPoints();
+        const byBand = new Map();
+        for (const c of NTSC_CHANNELS) {
+            if (!byBand.has(c.band)) byBand.set(c.band, []);
+            byBand.get(c.band).push(c);
+        }
+        for (const band of NTSC_ROWS) {
+            const row = document.createElement('div');
+            row.className = 'ntsc-row';
+            const lab = document.createElement('div');
+            lab.className = 'ntsc-lab';
+            lab.textContent = band;
+            const axis = document.createElement('div');
+            axis.className = 'ntsc-axis';
+            axis.dataset.band = band;
+            const chans = byBand.get(band).slice().sort((a, b) => a.fc - b.fc);
+            for (const c of chans) {
+                const el = document.createElement('div');
+                el.className = 'ntsc-ch';
+                el.dataset.id = c.id;
+                el.dataset.fc = String(c.fc);
+                el.title = `${c.id}  ${c.fc}`;
+                el.innerHTML =
+                    `<svg viewBox="0 0 ${NTSC_BASE_MHZ} 16" preserveAspectRatio="none">` +
+                    `<polygon points="${pts}" vector-effect="non-scaling-stroke"></polygon></svg>` +
+                    `<span class="ntsc-num">${c.n}</span>`;
+                axis.appendChild(el);
+            }
+            row.appendChild(lab);
+            row.appendChild(axis);
+            chart.appendChild(row);
+        }
+        this._layoutNtsc();
+        this._bindNtscPaint(chart);
+    }
+
+    _layoutNtsc() {
+        const span = NTSC_F1 - NTSC_F0;
+        const half = NTSC_BASE_MHZ / 2;
+        for (const el of document.querySelectorAll('#ntsc-chart .ntsc-ch')) {
+            const fc = +el.dataset.fc;
+            const x0 = (fc - half - NTSC_F0) / span;
+            const x1 = (fc + half - NTSC_F0) / span;
+            el.style.left = (x0 * 100) + '%';
+            el.style.width = Math.max(x1 - x0, 0) * 100 + '%';
+        }
+    }
+
+    /* Nearest carrier in this band whose 30 MHz base contains f.
+     * Gaps (Raceband, the hole in band E) return null so a drag there
+     * does not select a channel the pointer is not on. */
+    _ntscHit(band, f) {
+        const half = NTSC_BASE_MHZ / 2;
+        let best = null, bd = Infinity;
+        for (const c of NTSC_CHANNELS) {
+            if (c.band !== band) continue;
+            if (f < c.fc - half || f > c.fc + half) continue;
+            const d = Math.abs(f - c.fc);
+            if (d < bd || (d === bd && best && c.fc < best.fc)) {
+                bd = d;
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    _ntscChAt(clientX, clientY) {
+        let axis = null;
+        for (const row of document.querySelectorAll('#ntsc-chart .ntsc-row')) {
+            const rr = row.getBoundingClientRect();
+            if (clientY >= rr.top && clientY < rr.bottom) {
+                axis = row.querySelector('.ntsc-axis');
+                break;
+            }
+        }
+        if (!axis) return null;
+        const r = axis.getBoundingClientRect();
+        if (r.width < 1) return null;
+        const u = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+        const ch = this._ntscHit(axis.dataset.band, NTSC_F0 + u * (NTSC_F1 - NTSC_F0));
+        axis.title = ch ? `${ch.id}  ${ch.fc}` : '';
+        return ch;
+    }
+
+    _bindNtscPaint(chart) {
+        let paint = null;
+        const mark = (ch) => {
+            if (!ch || paint === null) return;
+            const el = chart.querySelector(`.ntsc-ch[data-id="${ch.id}"]`);
+            if (el) el.classList.toggle('on', paint);
+        };
+        chart.addEventListener('pointerdown', (e) => {
+            const ch = this._ntscChAt(e.clientX, e.clientY);
+            if (!ch) return;
+            const el = chart.querySelector(`.ntsc-ch[data-id="${ch.id}"]`);
+            paint = !(el && el.classList.contains('on'));
+            mark(ch);
+            try { chart.setPointerCapture(e.pointerId); } catch (_) {}
+            e.preventDefault();
+        });
+        chart.addEventListener('pointermove', (e) => {
+            if (paint === null) return;
+            mark(this._ntscChAt(e.clientX, e.clientY));
+        });
+        const end = () => {
+            if (paint === null) return;
+            paint = null;
+            this._commitNtscSel();
+        };
+        chart.addEventListener('pointerup', end);
+        chart.addEventListener('pointercancel', end);
+    }
+
+    _restoreNtsc() {
+        const want = new Set(this.s.ntscSel || []);
+        for (const el of document.querySelectorAll('#ntsc-chart .ntsc-ch'))
+            el.classList.toggle('on', want.has(el.dataset.id));
+        this._syncNtscWatch();
+    }
+
+    /* A click or a typed MHz near the FPV list is a bin on a channel,
+     * not the carrier. 12 MHz covers the FM skirt and stays short of
+     * the next 20 MHz-spaced channel. Farther away, the number stands. */
+    _snapMhz(mhz, snap) {
+        if (snap) {
+            let best = null, bd = 12;
+            for (const c of NTSC_CHANNELS) {
+                const d = Math.abs(c.fc - mhz);
+                if (d <= bd) { bd = d; best = c; }
+            }
+            if (best) return { mhz: best.fc, id: best.id };
+        }
+        const r = Math.round(mhz * 10) / 10;
+        let id = null, bd = 0.6;
+        for (const c of NTSC_CHANNELS) {
+            const d = Math.abs(c.fc - r);
+            if (d <= bd) { bd = d; id = c.id; }
+        }
+        return { mhz: r, id };
+    }
+
+    _watchMhz(mhz, snap) {
+        if (!Number.isFinite(mhz)) return;
+        const s = this._snapMhz(mhz, snap);
+        if (!(s.mhz >= 1000 && s.mhz <= 8000)) return;
+        this._vidClosed = false;
+        this.net.send({ type: 'video', freq_mhz: s.mhz });
+    }
+
+    _syncNtscWatch() {
+        const sel = [...document.querySelectorAll('#ntsc-chart .ntsc-ch.on')];
+        const input = $('ntsc-mhz');
+        if (!input) return;
+        if (sel.length === 1 && document.activeElement !== input)
+            input.value = sel[0].dataset.fc;
+        const mhz = parseFloat(input.value);
+        const btn = $('btn-watch');
+        if (btn) btn.disabled = !(mhz >= 1000 && mhz <= 8000);
+    }
+
+    _commitNtscSel() {
+        this._noteSweepEdit();
+        const sel = [...document.querySelectorAll('#ntsc-chart .ntsc-ch.on')]
+            .map(el => el.dataset.id);
+        this.s.ntscSel = sel;
+        this.save();
+        if (!sel.length) {
+            this.net.set({ lo_start: NTSC_F0, lo_end: NTSC_F1, bands: NTSC_SCAN });
+        } else {
+            const spans = sel.map(id => ntscChannelSpan(ntscById(id)));
+            this.net.set({ lo_start: NTSC_F0, lo_end: NTSC_F1, bands: mergeBands(spans) });
+        }
+        this._syncNtscWatch();
+        this._syncFreqColor();
+    }
+
+    /* Selected carriers, nearest one owns each MHz of its 30 MHz base.
+     * The slices do not overlap, so the sphere map and the FFT agree. */
+    _ntscChanRanges() {
+        const sel = (this.s.ntscSel || []).map(ntscById).filter(Boolean)
+            .sort((a, b) => a.fc - b.fc);
+        const n = sel.length;
+        if (!n) return null;
+        const ts = chanHueTs(sel.map(c => c.fc));
+        const half = NTSC_BASE_MHZ / 2;
+        let lo = Infinity, hi = -Infinity;
+        for (const c of sel) {
+            lo = Math.min(lo, Math.floor(c.fc - half));
+            hi = Math.max(hi, Math.ceil(c.fc + half));
+        }
+        const own = new Array(hi - lo).fill(-1);
+        for (let f = lo; f < hi; f++) {
+            const mid = f + 0.5;
+            let bi = -1, bd = Infinity;
+            for (let i = 0; i < n; i++) {
+                const fc = sel[i].fc;
+                if (mid < fc - half || mid >= fc + half) continue;
+                const d = Math.abs(mid - fc);
+                if (d < bd) { bd = d; bi = i; }
+            }
+            own[f - lo] = bi;
+        }
+        const out = [];
+        let i = 0;
+        while (i < own.length) {
+            if (own[i] < 0) { i++; continue; }
+            const t = ts[own[i]];
+            let j = i + 1;
+            while (j < own.length && own[j] === own[i]) j++;
+            out.push({ f0: lo + i, f1: lo + j, t });
+            i = j;
+        }
+        return out.length ? out : null;
     }
 
     onSpectrum(header, f32) {
@@ -1040,8 +1279,11 @@ export class Ui {
         const lo0 = (header.sweeps >>> 1) / 10;
         /* Raw thumb MHz changes inside a slice do not retune. Keying the
          * plan-snap off them paused hop EQ and jumped the Y scale. */
-        const [g0, g1] = this._freqTab === 'wifi' ? [0, 0] : this._rangeSlices();
-        const uiSig = `${this._freqTab}|${g0}|${g1}|${(this.s.wifiSel || []).join(',')}`;
+        const ranged = this._freqTab === 'range';
+        const [g0, g1] = ranged ? this._rangeSlices() : [0, 0];
+        const sel = this._freqTab === 'wifi' ? (this.s.wifiSel || [])
+            : this._freqTab === 'ntsc' ? (this.s.ntscSel || []) : [];
+        const uiSig = `${this._freqTab}|${g0}|${g1}|${sel.join(',')}`;
         if (lo0 !== this._fftPlanLo0 || uiSig !== this._fftUiSig) {
             this._fftPlanLo0 = lo0;
             this._fftUiSig = uiSig;
@@ -1065,7 +1307,8 @@ export class Ui {
         const specF1 = this._specF1 ?? HW_MAX;
         const n = this._fftAvg ? this._fftAvg.length : 0;
         const bin = n ? (specF1 - specF0) / n : 1;
-        const [view0, view1] = this._freqTab === 'wifi' ? this._wifiViewSpan() : [HW_MIN, HW_MAX];
+        const [view0, view1] = this._freqTab === 'wifi' ? this._wifiViewSpan()
+            : this._freqTab === 'ntsc' ? [NTSC_F0, NTSC_F1] : [HW_MIN, HW_MAX];
         const i0 = Math.max(0, Math.floor((view0 - specF0) / bin));
         const i1 = Math.min(n, Math.ceil((view1 - specF0) / bin));
         return { view0, view1, specF0, specF1, bin, i0, i1, n };
@@ -1510,6 +1753,11 @@ export class Ui {
                 t = (f - HW_MIN) / (HW_MAX - HW_MIN);
             else
                 t = (f - WIFI_F0) / Math.max(WIFI_F1 - WIFI_F0, 1);
+        } else if (this._freqTab === 'ntsc') {
+            if (this.s.wifiColor === 'full')
+                t = (f - HW_MIN) / (HW_MAX - HW_MIN);
+            else
+                t = (f - NTSC_F0) / Math.max(NTSC_F1 - NTSC_F0, 1);
         } else if (this.s.freqPin) {
             t = (f - HW_MIN) / (HW_MAX - HW_MIN);
         } else {
@@ -1624,6 +1872,12 @@ export class Ui {
                 this._commitWifiSel();
                 return;
             }
+            if (this._freqTab === 'ntsc') {
+                for (const el of document.querySelectorAll('#ntsc-chart .ntsc-ch.on'))
+                    el.classList.remove('on');
+                this._commitNtscSel();
+                return;
+            }
             this.s.manualLo = this.boardLo;
             this.s.manualHi = this.boardHi;
             if (this.s.scheme === 'target') this._syncTargetFromRange();
@@ -1688,6 +1942,7 @@ export class Ui {
         const now = performance.now();
         if (!force && now - this._rangeSendTimer < 80) return;
         this._rangeSendTimer = now;
+        this._noteSweepEdit();
         this.net.set({ lo_start: this.s.manualLo, lo_end: this.s.manualHi, bands: [] });
         this._syncFreqColor();
     }
@@ -1710,7 +1965,8 @@ export class Ui {
     }
 
     /* RANGE PIN: HSV locked to the hardware span. Off: stretch to the thumbs.
-     * WIFI BAND / CHAN / FULL: 5170–6725 stretch, per-channel hues, or the hardware span. */
+     * WIFI / NTSC BAND stretches the catalog. CHAN paints selected carriers.
+     * FULL is the hardware span. */
     _wifiChanRanges() {
         const tiles = [...document.querySelectorAll('#wifi-tiers .tile.on')]
             .map(el => {
@@ -1718,21 +1974,8 @@ export class Ui {
                 return { f0, f1, fc: 0.5 * (f0 + f1) };
             })
             .sort((a, b) => a.fc - b.fc);
-        const n = tiles.length;
-        if (!n) return null;
-        let ts;
-        if (n === 1) ts = [0.5];
-        else if (n === 2) ts = [0, 1];
-        else {
-            /* Neighbors at least 60 MHz of hue distance so they stay distinct. */
-            const gaps = [];
-            for (let i = 0; i < n - 1; i++)
-                gaps.push(Math.max(tiles[i + 1].fc - tiles[i].fc, 60));
-            let acc = 0;
-            const total = gaps.reduce((a, b) => a + b, 0);
-            ts = [0];
-            for (const g of gaps) { acc += g / total; ts.push(acc); }
-        }
+        if (!tiles.length) return null;
+        const ts = chanHueTs(tiles.map(t => t.fc));
         return tiles.map((t, i) => ({ f0: t.f0, f1: t.f1, t: ts[i] }));
     }
 
@@ -1744,9 +1987,9 @@ export class Ui {
             wcol.classList.toggle('on', this.s.wifiColor !== 'band');
         }
         this._chanRanges = null;
-        if (this.s.scheme === 'spectrum' && this._freqTab === 'wifi'
-                && this.s.wifiColor === 'chan') {
-            const ranges = this._wifiChanRanges();
+        if (this.s.scheme === 'spectrum' && this.s.wifiColor === 'chan'
+                && (this._freqTab === 'wifi' || this._freqTab === 'ntsc')) {
+            const ranges = this._freqTab === 'wifi' ? this._wifiChanRanges() : this._ntscChanRanges();
             if (ranges) {
                 this._chanRanges = ranges;
                 this.renderer.setChanMap(ranges);
@@ -1761,6 +2004,11 @@ export class Ui {
                 this.renderer.setFreqSpan(HW_MIN, HW_MAX);
             else
                 this.renderer.setFreqSpan(WIFI_F0, WIFI_F1);
+        } else if (this._freqTab === 'ntsc') {
+            if (this.s.wifiColor === 'full')
+                this.renderer.setFreqSpan(HW_MIN, HW_MAX);
+            else
+                this.renderer.setFreqSpan(NTSC_F0, NTSC_F1);
         } else if (this.s.freqPin) {
             this.renderer.setFreqSpan(HW_MIN, HW_MAX);
         } else {
@@ -2005,7 +2253,7 @@ export class Ui {
     }
 
     _restoreDefaults() {
-        this.s = { ...DEFAULTS, wifiSel: [], corners: defaultCorners() };
+        this.s = { ...DEFAULTS, wifiSel: [], ntscSel: [], corners: defaultCorners() };
         this.s.manualLo = this.boardLo;
         this.s.manualHi = this.boardHi;
         this.save();
@@ -2036,6 +2284,316 @@ export class Ui {
             $(`t-${id}`).classList.toggle('on', !!this.s[key]);
         $('btn-mirror').classList.toggle('on', !!this.s.mirrors);
         $('btn-flip').classList.toggle('on', !!this.s.flip);
+    }
+
+    /* A freq-panel edit replaces the dwell. The saved sweep is dropped
+     * because the edit is the new plan. */
+    _noteSweepEdit() {
+        if (!this._hold) return;
+        this._hold = null;
+        this._syncHoldChip();
+    }
+
+    _sliceOf(freq) {
+        const step = FFT_HOP_MHZ;
+        if (!Number.isFinite(freq)) return null;
+        const lo = HW_MIN + step * Math.floor((freq - HW_MIN) / step);
+        const hi = lo + step;
+        if (lo < this.boardLo - 1e-3 || hi > this.boardHi + 1e-3) return null;
+        return [lo, hi];
+    }
+
+    _pushHold() {
+        const { lo, hi } = this._hold;
+        this.net.set({ lo_start: lo, lo_end: hi, bands: [[lo, hi]] });
+    }
+
+    _syncHoldChip() {
+        const row = $('hold-row');
+        const el = $('hold-chip');
+        if (!this._hold) {
+            row.classList.remove('show');
+            el.textContent = '';
+            return;
+        }
+        const f = this._hold.freq;
+        const s = Number.isFinite(f) ? this._snapMhz(f, true) : null;
+        const mid = s ? Math.round(s.mhz) : Math.round(0.5 * (this._hold.lo + this._hold.hi));
+        el.textContent = `HOLD ${mid}`;
+        row.classList.add('show');
+    }
+
+    _beginHold(lo, hi, freq) {
+        if (!this._hold) {
+            this._hold = {
+                lo, hi, freq,
+                saved: {
+                    manualLo: this.s.manualLo,
+                    manualHi: this.s.manualHi,
+                    freqTab: this._freqTab,
+                    wifiSel: (this.s.wifiSel || []).map(b => [b[0], b[1]]),
+                    ntscSel: (this.s.ntscSel || []).slice(),
+                },
+            };
+        } else {
+            this._hold.lo = lo;
+            this._hold.hi = hi;
+            this._hold.freq = freq;
+        }
+        this._pushHold();
+        this._syncHoldChip();
+        this._setHint(false);
+    }
+
+    _endHold(restore) {
+        const h = this._hold;
+        if (!h) return;
+        this._hold = null;
+        this._syncHoldChip();
+        if (!restore) return;
+        const s = h.saved;
+        this.s.manualLo = s.manualLo;
+        this.s.manualHi = s.manualHi;
+        this.s.wifiSel = s.wifiSel;
+        this.s.ntscSel = s.ntscSel;
+        this._restoreWifiTiles();
+        this._restoreNtsc();
+        if (this._layoutManual) this._layoutManual();
+        if (this._selectFreqTab) this._selectFreqTab(s.freqTab, false);
+        if (this.s.scheme === 'target') this._applyTargetSweep(true);
+        else if (this._freqTab === 'range') this._applyManualRange(true);
+    }
+
+    _bindHold() {
+        const gl = $('gl');
+        /* A held mouse drifts. A tight slop cancelled the press before the
+         * timer, so the ring never got to finish. */
+        const slop = 36;
+        const ms = 900;
+        let arm = null;
+        const drop = () => {
+            if (!arm) return;
+            clearTimeout(arm.timer);
+            arm = null;
+            this._chargeStop();
+        };
+        gl.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;
+            if (this.calOn) return;
+            drop();
+            /* A click during a dwell puts the sweep back. It does not
+             * start another one. */
+            if (this._hold) {
+                arm = { x: e.clientX, y: e.clientY, release: true };
+                return;
+            }
+            const hit = this.renderer.pickFreq(e.clientX, e.clientY);
+            const slice = hit && this._sliceOf(hit.freq);
+            if (!slice) return;
+            const rgb = this.renderer.pointColor(hit.freq, hit.inten);
+            const freq = hit.freq;
+            const timer = setTimeout(() => {
+                if (!arm || arm.release) return;
+                const lo = arm.lo, hi = arm.hi, f = arm.freq;
+                drop();
+                if (this.state && this.state.mode === 'video') this._watchMhz(f, true);
+                else this._beginHold(lo, hi, f);
+            }, ms);
+            arm = { x: e.clientX, y: e.clientY, lo: slice[0], hi: slice[1], freq, timer };
+            this._chargeStart(e.clientX, e.clientY, rgb, ms);
+        });
+        gl.addEventListener('pointermove', (e) => {
+            if (!arm) return;
+            if (Math.hypot(e.clientX - arm.x, e.clientY - arm.y) > slop) drop();
+        });
+        gl.addEventListener('pointerup', (e) => {
+            if (!arm) return;
+            const moved = Math.hypot(e.clientX - arm.x, e.clientY - arm.y) > slop;
+            const release = arm.release && !moved;
+            drop();
+            if (release) this._endHold(true);
+        });
+        gl.addEventListener('pointercancel', drop);
+        gl.addEventListener('contextmenu', (e) => e.preventDefault());
+        $('hold-chip').onclick = () => this._endHold(true);
+        $('hold-watch').onclick = (e) => {
+            e.stopPropagation();
+            if (!this._hold || !Number.isFinite(this._hold.freq)) return;
+            this._watchMhz(this._hold.freq, true);
+        };
+    }
+
+    _bindVideo() {
+        const win = $('vid-win');
+        const bar = $('vid-bar');
+        let drag = null;
+        bar.addEventListener('pointerdown', (e) => {
+            if (e.target.closest('button')) return;
+            const r = win.getBoundingClientRect();
+            drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+            try { bar.setPointerCapture(e.pointerId); } catch (_) {}
+        });
+        bar.addEventListener('pointermove', (e) => {
+            if (!drag) return;
+            const x = Math.max(0, Math.min(e.clientX - drag.dx, innerWidth - 80));
+            const y = Math.max(0, Math.min(e.clientY - drag.dy, innerHeight - 48));
+            win.style.left = x + 'px';
+            win.style.top = y + 'px';
+            win.style.bottom = 'auto';
+        });
+        const end = () => { drag = null; };
+        bar.addEventListener('pointerup', end);
+        bar.addEventListener('pointercancel', end);
+        $('vid-close').onclick = (e) => {
+            e.stopPropagation();
+            this._vidClosed = true;
+            this._vidGot = false;
+            this._vidErrHold = '';
+            win.classList.remove('show');
+            this._dropVidUrl();
+            this.net.send({ type: 'video_stop' });
+        };
+        const input = $('ntsc-mhz');
+        input.addEventListener('input', () => this._syncNtscWatch());
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const mhz = parseFloat(input.value);
+                this._watchMhz(mhz, true);
+            }
+        });
+        $('btn-watch').onclick = () => {
+            const mhz = parseFloat($('ntsc-mhz').value);
+            this._watchMhz(mhz, true);
+        };
+        this._vidClosed = false;
+        this._vidGot = false;
+        this._vidMhz = null;
+        this._vidErrHold = '';
+        this._vidFps = 0;
+        this._vidBusy = false;
+        this._vidPending = null;
+        this._vidUrl = null;
+    }
+
+    _dropVidUrl() {
+        if (this._vidUrl) {
+            URL.revokeObjectURL(this._vidUrl);
+            this._vidUrl = null;
+        }
+        const img = $('vid-img');
+        if (img) img.removeAttribute('src');
+    }
+
+    _vidMsg(text) {
+        const el = $('vid-msg');
+        el.textContent = text || '';
+        el.style.display = text ? '' : 'none';
+    }
+
+    _vidTitle(mhz) {
+        const s = this._snapMhz(mhz, false);
+        const n = Number.isInteger(s.mhz) ? String(s.mhz) : s.mhz.toFixed(1);
+        $('vid-title').textContent = s.id ? `${s.id}  ${n}` : `${n} MHz`;
+    }
+
+    _syncVideo(st) {
+        const win = $('vid-win');
+        if (st.mode === 'video') {
+            if (this._vidClosed) return;
+            if (st.video_mhz !== this._vidMhz) {
+                this._vidMhz = st.video_mhz;
+                this._vidGot = false;
+                this._dropVidUrl();
+                $('vid-fps').textContent = '';
+            }
+            this._vidErrHold = '';
+            win.classList.add('show');
+            this._vidTitle(st.video_mhz);
+            if (!this._vidGot)
+                this._vidMsg((st.video_err || 'TUNING').toUpperCase());
+            return;
+        }
+        if (st.video_err && !this._vidClosed) {
+            this._vidErrHold = st.video_err;
+            this._vidGot = false;
+            win.classList.add('show');
+            this._vidMsg(st.video_err.toUpperCase());
+            $('vid-fps').textContent = '';
+            return;
+        }
+        if (!this._vidErrHold) {
+            win.classList.remove('show');
+            this._vidGot = false;
+            this._vidMhz = null;
+            this._dropVidUrl();
+        }
+    }
+
+    onVideoFrame(header, u8) {
+        if (this._vidClosed) return;
+        if (!(this.state && this.state.mode === 'video')) return;
+        this._vidFps = header.fps || 0;
+        this._vidGot = true;
+        $('vid-fps').textContent = this._vidFps ? `${this._vidFps.toFixed(0)} FPS` : '';
+        this._vidMsg('');
+        const copy = u8.slice();
+        if (this._vidBusy) {
+            this._vidPending = copy;
+            return;
+        }
+        this._showJpeg(copy);
+    }
+
+    _showJpeg(u8) {
+        this._vidBusy = true;
+        const url = URL.createObjectURL(new Blob([u8], { type: 'image/jpeg' }));
+        const img = $('vid-img');
+        const prev = this._vidUrl;
+        this._vidUrl = url;
+        const done = () => {
+            if (prev) URL.revokeObjectURL(prev);
+            this._vidBusy = false;
+            const next = this._vidPending;
+            this._vidPending = null;
+            if (next) this._showJpeg(next);
+        };
+        img.onload = done;
+        img.onerror = done;
+        img.src = url;
+    }
+
+    /* Ring at the press. Color and slice are fixed from the point under
+     * the cursor when the press started, and the sweep always takes `ms`. */
+    _chargeStart(x, y, rgb, ms) {
+        this._chargeStop();
+        const el = $('hold-charge');
+        const [r, g, b] = rgb;
+        const css = `rgb(${r},${g},${b})`;
+        const dim = `rgba(${r},${g},${b},0.28)`;
+        el.style.left = x + 'px';
+        el.style.top = y + 'px';
+        const t0 = performance.now();
+        const token = (this._chargeTok = (this._chargeTok || 0) + 1);
+        const paint = (p) => {
+            el.style.background = `conic-gradient(from -90deg, ${css} ${(p * 100).toFixed(1)}%, ${dim} 0)`;
+        };
+        paint(0);
+        el.classList.add('on');
+        const tick = () => {
+            if (this._chargeTok !== token) return;
+            const p = Math.min(1, (performance.now() - t0) / ms);
+            paint(p);
+            if (p < 1) this._chargeTimer = setTimeout(tick, 16);
+        };
+        this._chargeTimer = setTimeout(tick, 16);
+    }
+
+    _chargeStop() {
+        this._chargeTok = (this._chargeTok || 0) + 1;
+        if (this._chargeTimer) clearTimeout(this._chargeTimer);
+        this._chargeTimer = 0;
+        const el = $('hold-charge');
+        if (el) el.classList.remove('on');
     }
 
     // ==================================================================
@@ -2141,7 +2699,17 @@ export class Ui {
         if (lab) lab.textContent = this._lockLabel(st);
         this._syncSweepFields(st);
         const lockBtn = $('s-lock');
-        if (lockBtn) lockBtn.disabled = !!st.lock_busy;
+        if (lockBtn) lockBtn.disabled = !!st.lock_busy || st.mode === 'video';
+        const gainWrap = $('gain-wrap');
+        if (gainWrap) {
+            gainWrap.classList.toggle('agc', st.mode === 'video');
+            gainWrap.title = st.mode === 'video'
+                ? 'Decoder AGC is running. This slider returns with the sweep.'
+                : '';
+        }
+        const gainLab = $('gain-label');
+        if (gainLab) gainLab.textContent = st.mode === 'video' ? 'AGC' : 'RF GAIN';
+        this._syncVideo(st);
         if (!this._gainDraggingRef()) {
             // don't fight the user's finger; adopt backend gain otherwise
             const g = Math.max(0, Math.min(RF_GAIN_MAX, st.gain | 0));
@@ -2182,6 +2750,11 @@ export class Ui {
 
     tick(gpuFps, netFps, pts) {
         const st = this.state;
+        if (st && st.mode === 'video') {
+            $('fps').textContent =
+                `GPU:${gpuFps.toFixed(0)}  VID:${(this._vidFps || 0).toFixed(1)}`;
+            return;
+        }
         let extra = '';
         if (st && typeof st.adc_peak === 'number') {
             extra = `  ADC:${st.adc_peak | 0}/${(st.adc_rms || 0).toFixed(1)}`;
@@ -2193,11 +2766,35 @@ export class Ui {
     }
 }
 
+function sanitizeNtscSel(v) {
+    if (!Array.isArray(v)) return [];
+    const out = [];
+    for (const id of v) {
+        if (typeof id === 'string' && ntscById(id) && !out.includes(id)) out.push(id);
+    }
+    return out;
+}
+
 function sanitizeWifiSel(v) {
     if (!Array.isArray(v)) return [];
     return v.filter(b => Array.isArray(b) && b.length >= 2)
         .map(b => [Number(b[0]), Number(b[1])])
         .filter(b => Number.isFinite(b[0]) && Number.isFinite(b[1]));
+}
+
+/* Neighbors at least 60 MHz of hue distance so they stay distinct. */
+function chanHueTs(fcs) {
+    const n = fcs.length;
+    if (n <= 1) return [0.5];
+    if (n === 2) return [0, 1];
+    const gaps = [];
+    for (let i = 0; i < n - 1; i++)
+        gaps.push(Math.max(fcs[i + 1] - fcs[i], 60));
+    let acc = 0;
+    const total = gaps.reduce((a, b) => a + b, 0);
+    const ts = [0];
+    for (const g of gaps) { acc += g / total; ts.push(acc); }
+    return ts;
 }
 
 function mergeBands(bands) {

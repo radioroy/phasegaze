@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdatomic.h>
 
 #include <fftw3.h>
 
@@ -30,6 +31,7 @@
 #include "hop.h"
 #include "server.h"
 #include "pg_stream.h"
+#include "video.h"
 #include "external/mongoose.h"
 
 #define DEVICE_PATH      "/dev/csi_stream0"
@@ -112,6 +114,24 @@ static struct {
 
 static csi_dev_t g_dev;
 static volatile sig_atomic_t g_quit = 0;
+/* Video parks the sweep and closes the CSI node. g_video_mode is what the
+ * page sees; g_video_on means this process has handed the radio over. */
+static int g_video_mode;
+static int g_video_on;
+static double g_video_mhz;
+static double g_video_tuned;
+static int g_video_nudges;
+static char g_video_err[80];
+static atomic_int g_csi_open;
+static int g_tuner_up;
+static atomic_int g_park;
+static int g_parked;
+static pthread_mutex_t g_park_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_park_cv = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t g_cmd_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cmd_cv = PTHREAD_COND_INITIALIZER;
+static int g_cmd;
+static double g_cmd_mhz;
 /* Sweep ceiling. A config edit or a lock measure sets it, and either
  * one stays inside 4480–6740. Spectrum bins stay on the full span. */
 static double g_hw_lo = HW_LO_MIN_MHZ;
@@ -264,10 +284,35 @@ static int on_control(const char *msg, size_t len, void *user)
         /* JTAG from this thread would land between retunes at random. */
         if (apply_gain >= 0)
             tuner_set_gain(apply_gain);
+    } else if (strcmp(type, "video") == 0) {
+        if (mg_json_get_num(json, "$.freq_mhz", &d) && d >= 1000.0 && d <= 8000.0) {
+            pthread_mutex_lock(&g_set.mtx);
+            if (!g_lock_busy) {
+                g_video_mode = 1;
+                g_video_mhz = d;
+                g_video_err[0] = 0;
+                changed = 1;
+            }
+            pthread_mutex_unlock(&g_set.mtx);
+            if (changed) {
+                pthread_mutex_lock(&g_cmd_mtx);
+                g_cmd = 1;
+                g_cmd_mhz = d;
+                pthread_cond_signal(&g_cmd_cv);
+                pthread_mutex_unlock(&g_cmd_mtx);
+            }
+        }
+    } else if (strcmp(type, "video_stop") == 0) {
+        pthread_mutex_lock(&g_cmd_mtx);
+        g_cmd = 2;
+        pthread_cond_signal(&g_cmd_cv);
+        pthread_mutex_unlock(&g_cmd_mtx);
+        changed = 1;
     } else if (strcmp(type, "lock_cal") == 0) {
         int start = 0;
         pthread_mutex_lock(&g_set.mtx);
-        if (!g_lock_busy) {
+        /* The measure walks the VCO on the open CSI fd. Video has closed it. */
+        if (!g_lock_busy && !g_video_mode && atomic_load(&g_csi_open)) {
             g_lock_busy = 1;
             g_lock_err = 0;
             start = 1;
@@ -292,10 +337,19 @@ static void state_json(char *buf, size_t cap, void *user)
     tuner_stats_t ts;
     tuner_get_stats(&ts);
     pthread_mutex_lock(&g_set.mtx);
+    char verr[80];
+    size_t vj = 0;
+    for (size_t i = 0; g_video_err[i] && vj + 1 < sizeof verr; i++) {
+        unsigned char c = (unsigned char)g_video_err[i];
+        if (c < 32 || c == '"' || c == '\\') continue;
+        verr[vj++] = (char)c;
+    }
+    verr[vj] = 0;
     int n = snprintf(buf, cap,
         "{\"type\":\"state\",\"lo_start\":%.1f,\"lo_end\":%.1f,"
         "\"hw_min\":%.1f,\"hw_max\":%.1f,\"lo_step\":%.1f,"
         "\"lock_lo\":%d,\"lock_hi\":%d,\"lock_busy\":%d,\"lock_err\":%d,"
+        "\"mode\":\"%s\",\"video_mhz\":%.1f,\"video_err\":\"%s\","
         "\"gain\":%d,\"output_fraction\":%.3f,"
         "\"closure_max\":%.3f,\"balance_db\":%.1f,\"spur_mask\":%d,"
         "\"bg_norm\":%d,\"cfar_db\":%.2f,\"spur_margin\":%.2f,"
@@ -311,6 +365,7 @@ static void state_json(char *buf, size_t cap, void *user)
         g_set.lo_start, g_set.lo_end,
         g_hw_lo, g_hw_hi, LO_STEP_MHZ,
         g_lock_lo, g_lock_hi, g_lock_busy, g_lock_err,
+        g_video_mode ? "video" : "sweep", g_video_mhz, verr,
         g_set.gain, g_set.output_fraction,
         (double)g_set.closure_max, (double)g_set.balance_db, g_set.spur_mask,
         g_set.bg_norm, (double)g_set.cfar_db, (double)g_set.spur_margin,
@@ -319,7 +374,8 @@ static void state_json(char *buf, size_t cap, void *user)
         (unsigned long long)__atomic_load_n(&g_gstats.rej_closure, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&g_gstats.rej_spur, __ATOMIC_RELAXED),
         (double)g_fps, g_last_points, g_adc_peak, (double)g_adc_rms,
-        g_dev.analog_lna_db, g_dev.analog_vga_db,
+        g_video_mode ? -1 : g_dev.analog_lna_db,
+        g_video_mode ? -1 : g_dev.analog_vga_db,
         ts.rt, (unsigned long long)ts.spans, (unsigned long long)ts.retunes,
         (unsigned long long)ts.deferred, (unsigned long long)ts.late_land,
         (unsigned long long)ts.resyncs, ts.span_us, ts.min_late_us, ts.write_us,
@@ -740,6 +796,49 @@ static inline uint32_t ring_used32(uint32_t head, uint32_t tail, uint64_t size)
     return (head >= tail) ? (head - tail) : ((uint32_t)size - (tail - head));
 }
 
+static void workers_park_wait(void)
+{
+    pthread_mutex_lock(&g_park_mtx);
+    g_parked++;
+    pthread_cond_broadcast(&g_park_cv);
+    while (atomic_load(&g_park) && !g_quit)
+        pthread_cond_wait(&g_park_cv, &g_park_mtx);
+    g_parked--;
+    pthread_mutex_unlock(&g_park_mtx);
+}
+
+/* Block until both DSP threads are out of the CSI ring. On timeout the
+ * park is cancelled and the sweep keeps the device. */
+static int workers_quiesce(void)
+{
+    atomic_store(&g_park, 1);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 2;
+    pthread_mutex_lock(&g_park_mtx);
+    while (g_parked < N_WORKERS && !g_quit) {
+        if (pthread_cond_timedwait(&g_park_cv, &g_park_mtx, &ts) == ETIMEDOUT)
+            break;
+    }
+    int ok = g_parked >= N_WORKERS;
+    pthread_mutex_unlock(&g_park_mtx);
+    if (!ok) {
+        atomic_store(&g_park, 0);
+        pthread_mutex_lock(&g_park_mtx);
+        pthread_cond_broadcast(&g_park_cv);
+        pthread_mutex_unlock(&g_park_mtx);
+    }
+    return ok;
+}
+
+static void workers_release(void)
+{
+    atomic_store(&g_park, 0);
+    pthread_mutex_lock(&g_park_mtx);
+    pthread_cond_broadcast(&g_park_cv);
+    pthread_mutex_unlock(&g_park_mtx);
+}
+
 /* Copy the settled second half of the next usable span. */
 static int claim_span(uint8_t *dst, span_tag_t *tag, frame_acc_t **acc, int spectrum)
 {
@@ -747,7 +846,7 @@ static int claim_span(uint8_t *dst, span_tag_t *tag, frame_acc_t **acc, int spec
     const uint64_t rsz = g_dev.ring_size;
     const uint32_t off = span - BLOCK_BYTES;
 
-    while (!g_quit) {
+    while (!g_quit && !atomic_load(&g_park)) {
         pthread_mutex_lock(&g_claim_mtx);
         uint32_t head, tail;
         if (csi_dev_ring_pos(&g_dev, &head, &tail) == 0) {
@@ -854,14 +953,24 @@ static void *worker(void *arg)
 
     settings_t set_snap;
     while (!g_quit) {
+        if (atomic_load(&g_park)) {
+            workers_park_wait();
+            continue;
+        }
         pthread_mutex_lock(&g_set.mtx);
         set_snap = g_set;
         pthread_mutex_unlock(&g_set.mtx);
 
         span_tag_t tag;
         frame_acc_t *acc;
-        if (!claim_span(w->blk, &tag, &acc, set_snap.spectrum))
+        if (!claim_span(w->blk, &tag, &acc, set_snap.spectrum)) {
+            if (g_quit) break;
+            if (atomic_load(&g_park)) {
+                workers_park_wait();
+                continue;
+            }
             break;
+        }
 
         int active_topk = (int)((float)TOPK_BASE * set_snap.output_fraction);
         if (active_topk < 1) active_topk = 1;
@@ -910,6 +1019,161 @@ static void wctx_free(wctx_t *w)
     free(w->blk);
 }
 
+static void video_set_status(int mode, double mhz, const char *err)
+{
+    pthread_mutex_lock(&g_set.mtx);
+    g_video_mode = mode;
+    if (mhz > 0.0)
+        g_video_mhz = mhz;
+    snprintf(g_video_err, sizeof g_video_err, "%s", err ? err : "");
+    pthread_mutex_unlock(&g_set.mtx);
+}
+
+/* csi_dev_open puts interleave, the 20 MHz front-end, and all four
+ * antennas back. The sweep's manual gain word is restored here; video
+ * ran on the decoder's AGC and did not change g_set.gain. */
+static void radio_to_sweep(void)
+{
+    int gain;
+    sweep_plan_t plan;
+    pthread_mutex_lock(&g_set.mtx);
+    gain = g_set.gain;
+    plan = g_plan;
+    pthread_mutex_unlock(&g_set.mtx);
+
+    if (!atomic_load(&g_csi_open)) {
+        int ok = 0;
+        for (int i = 0; i < 10 && !g_quit; i++) {
+            if (csi_dev_open(&g_dev, DEVICE_PATH) == 0) {
+                ok = 1;
+                break;
+            }
+            usleep(150000);
+        }
+        if (!ok) {
+            fprintf(stderr, "phasegaze: csi reopen failed\n");
+            return;
+        }
+        atomic_store(&g_csi_open, 1);
+        csi_dev_set_gain(&g_dev, gain);
+        csi_dev_probe_analog_gain(&g_dev);
+    }
+    if (!g_tuner_up) {
+        if (tuner_start(&g_dev, TUNER_CPU, &plan) != 0)
+            fprintf(stderr, "phasegaze: tuner restart failed\n");
+        else
+            g_tuner_up = 1;
+    }
+    /* A range edit can land between the snapshot above and tuner_start. */
+    if (g_tuner_up) {
+        pthread_mutex_lock(&g_set.mtx);
+        if (!plan_same(&plan, &g_plan))
+            tuner_set_plan(&g_plan);
+        pthread_mutex_unlock(&g_set.mtx);
+    }
+    workers_release();
+}
+
+static void video_restore_sweep(const char *err)
+{
+    g_video_on = 0;
+    g_video_tuned = 0;
+    video_pipeline_stop();
+    if (!g_quit)
+        radio_to_sweep();
+    video_set_status(0, 0, err ? err : "");
+}
+
+/* Park the synthesizer on mhz with the sweep's VCO table, then the
+ * video front-end. The demod must not call setFrequency after this. */
+static int video_lock_lo(double mhz)
+{
+    if (!atomic_load(&g_csi_open)) {
+        int ok = 0;
+        for (int i = 0; i < 10 && !g_quit; i++) {
+            if (csi_dev_open(&g_dev, DEVICE_PATH) == 0) {
+                ok = 1;
+                break;
+            }
+            usleep(150000);
+        }
+        if (!ok)
+            return -1;
+        atomic_store(&g_csi_open, 1);
+    }
+    int rc = csi_dev_set_lo(&g_dev, mhz);
+    if (rc == 0)
+        rc = csi_dev_video_front_end(&g_dev);
+    csi_dev_close(&g_dev);
+    atomic_store(&g_csi_open, 0);
+    return rc;
+}
+
+static void video_enter(double mhz)
+{
+    if (g_quit) return;
+    pthread_mutex_lock(&g_set.mtx);
+    int busy = g_lock_busy;
+    pthread_mutex_unlock(&g_set.mtx);
+    if (busy) {
+        video_set_status(0, mhz, "lock measure");
+        return;
+    }
+    if (g_video_on && !video_pipeline_dead() && fabs(g_video_tuned - mhz) < 0.05)
+        return;
+
+    if (!g_video_on) {
+        if (!workers_quiesce()) {
+            video_set_status(0, mhz, "sweep busy");
+            return;
+        }
+        if (g_quit) {
+            workers_release();
+            return;
+        }
+        g_video_on = 1;
+        tuner_stop();
+        g_tuner_up = 0;
+        pthread_mutex_lock(&g_frame_mtx);
+        for (int i = 0; i < N_ACC; i++)
+            g_acc[i].used = 0;
+        pthread_mutex_unlock(&g_frame_mtx);
+    } else {
+        video_pipeline_stop();
+    }
+
+    if (g_quit) return;
+    if (video_lock_lo(mhz) != 0) {
+        video_restore_sweep("front end");
+        return;
+    }
+    if (video_pipeline_start(mhz) != 0) {
+        char err[80];
+        video_pipeline_error(err, sizeof err);
+        video_restore_sweep(err[0] ? err : "no picture");
+        return;
+    }
+    g_video_tuned = mhz;
+    video_set_status(1, mhz, "");
+    fprintf(stderr, "phasegaze: video %.1f MHz\n", mhz);
+}
+
+static void video_leave(void)
+{
+    if (!g_video_on && !g_video_mode)
+        return;
+    fprintf(stderr, "phasegaze: sweep\n");
+    video_restore_sweep("");
+}
+
+static void video_fail(void)
+{
+    char err[80];
+    video_pipeline_error(err, sizeof err);
+    fprintf(stderr, "phasegaze: video ended\n");
+    video_restore_sweep(err[0] ? err : "no picture");
+}
+
 int main(int argc, char **argv)
 {
     int port = 8001;
@@ -932,6 +1196,7 @@ int main(int argc, char **argv)
 
     if (csi_dev_open(&g_dev, DEVICE_PATH) != 0)
         return 1;
+    atomic_store(&g_csi_open, 1);
     lock_load();
     clamp_sweep_to_hw();
     csi_dev_set_gain(&g_dev, g_set.gain);
@@ -966,6 +1231,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "tuner start failed\n");
         return 1;
     }
+    g_tuner_up = 1;
 
     char url[64];
     snprintf(url, sizeof(url), "http://0.0.0.0:%d", port);
@@ -992,20 +1258,63 @@ int main(int argc, char **argv)
     }
 
     while (!g_quit) {
-        usleep(500000);
+        int cmd = 0;
+        double mhz = 0;
+        pthread_mutex_lock(&g_cmd_mtx);
+        if (!g_cmd) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 500000000L;
+            if (ts.tv_nsec >= 1000000000L) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000L;
+            }
+            pthread_cond_timedwait(&g_cmd_cv, &g_cmd_mtx, &ts);
+        }
+        cmd = g_cmd;
+        mhz = g_cmd_mhz;
+        g_cmd = 0;
+        pthread_mutex_unlock(&g_cmd_mtx);
+        if (g_quit) break;
+        if (cmd == 1) {
+            g_video_nudges = 0;
+            video_enter(video_snap_mhz(mhz));
+        } else if (cmd == 2)
+            video_leave();
+        if (g_video_on && g_video_nudges < 2) {
+            double nudge = 0;
+            if (video_steer_take(&nudge)) {
+                g_video_nudges++;
+                fprintf(stderr, "phasegaze: video center %.0f MHz\n", nudge);
+                video_enter(nudge);
+            }
+        }
+        if (g_video_on && video_pipeline_dead())
+            video_fail();
+        if (!atomic_load(&g_csi_open) && !g_video_on)
+            radio_to_sweep();
         server_broadcast_state();
     }
 
+    video_pipeline_stop();
+    g_video_on = 0;
+    /* Park stays set if the ring is already unmapped. g_quit lets the
+     * wait return; clearing park here would send a worker into it. */
+    pthread_mutex_lock(&g_park_mtx);
+    pthread_cond_broadcast(&g_park_cv);
+    pthread_mutex_unlock(&g_park_mtx);
     for (int i = 0; i < N_WORKERS; ++i)
         pthread_join(wk[i].th, NULL);
     /* The measure thread stops and restarts the tuner. Wait it out so
      * this join is the only one. */
     for (int i = 0; i < 2000 && g_lock_busy; i++)
         usleep(10000);
-    tuner_stop();
+    if (g_tuner_up)
+        tuner_stop();
     server_stop();
     for (int i = 0; i < N_WORKERS; ++i)
         wctx_free(&wk[i]);
-    csi_dev_close(&g_dev);
+    if (atomic_load(&g_csi_open))
+        csi_dev_close(&g_dev);
     return 0;
 }

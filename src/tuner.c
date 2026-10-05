@@ -92,6 +92,7 @@ static struct {
     int             hold;
     int             warm;
     uint64_t        lost;               /* driver loss counters, summed */
+    atomic_int      up;                 /* 1 while tuner_main is joinable */
 } T = {
     .mtx = PTHREAD_MUTEX_INITIALIZER,
     .gain_pending = -1,
@@ -464,6 +465,8 @@ static void *tuner_main(void *arg)
 
 int tuner_start(csi_dev_t *d, int cpu, const tuner_plan_t *plan)
 {
+    if (atomic_load(&T.up))
+        return -1;
     T.d = d;
     T.cpu = cpu;
     T.span = d->span_bytes;
@@ -476,11 +479,16 @@ int tuner_start(csi_dev_t *d, int cpu, const tuner_plan_t *plan)
     T.next_plan = *plan;
     T.plan_pending = 1;
     atomic_store(&T.quit, 0);
-    return pthread_create(&T.th, NULL, tuner_main, NULL);
+    if (pthread_create(&T.th, NULL, tuner_main, NULL) != 0)
+        return -1;
+    atomic_store(&T.up, 1);
+    return 0;
 }
 
 void tuner_stop(void)
 {
+    if (!atomic_exchange(&T.up, 0))
+        return;
     atomic_store(&T.quit, 1);
     pthread_join(T.th, NULL);
 }

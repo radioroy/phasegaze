@@ -11,6 +11,7 @@ export class Net {
         this.ws = null;
         this.onPoints = null;
         this.onSpectrum = null;
+        this.onVideo = null;
         this.onState = null;
         this.onStatus = null;
         this._timer = null;
@@ -74,6 +75,10 @@ export class Net {
             const need = HDR_BYTES + header.count * 4;
             if (buf.byteLength < need) return;
             this.onSpectrum(header, new Float32Array(buf, HDR_BYTES, header.count));
+        } else if (header.type === 2 && this.onVideo) {
+            const n = header.count;
+            if (n < 64 || buf.byteLength < HDR_BYTES + n) return;
+            this.onVideo(header, new Uint8Array(buf, HDR_BYTES, n));
         }
     }
 

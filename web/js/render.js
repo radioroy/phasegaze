@@ -323,6 +323,22 @@ function buildHemiGeometry(front) {
 
 const IDENT_Q = [0, 0, 0, 1];
 
+function qrot(qx, qy, qz, qw, x, y, z) {
+    const cx = qy * z - qz * y + qw * x;
+    const cy = qz * x - qx * z + qw * y;
+    const cz = qx * y - qy * x + qw * z;
+    return [
+        x + 2 * (qy * cz - qz * cy),
+        y + 2 * (qz * cx - qx * cz),
+        z + 2 * (qx * cy - qy * cx),
+    ];
+}
+
+function smoothstep(e0, e1, x) {
+    const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+}
+
 export class VrfRenderer {
     constructor(canvas) {
         // alpha so camera mode can composite the point cloud over the video
@@ -585,6 +601,163 @@ export class VrfRenderer {
         this.aAux.needsUpdate = true;
         this.head = 0; this.used = 0; this._fresh = 0;
         this.pointGeo.setDrawRange(0, 0);
+    }
+
+    /* Screen-space pick of a live point. Returns {freq, score} or null.
+     * Same projection as the point shader, so a long-press lands on the
+     * cluster the user is looking at rather than a hue sampled off the
+     * framebuffer. Mirrors are only tested when the primary draw misses. */
+    pickFreq(clientX, clientY) {
+        const n = this.used;
+        if (!n) return null;
+        this.camera.updateMatrixWorld();
+        const u = this.pointUniforms;
+        const morph = u.uMorph.value;
+        const tau = u.uDecayTau.value;
+        const now = u.uNow.value;
+        const gain = u.uGain.value;
+        const flipX = u.uFlipX.value;
+        const extrap = u.uExtrap.value;
+        const sfK = u.uSfK.value;
+        const qv = u.uQuatView.value;
+        const c0 = u.uC0.value, c1 = u.uC1.value, c2 = u.uC2.value, c3 = u.uC3.value;
+        const grad = this.aGrad.array, aux = this.aAux.array, quat = this.aQuat.array;
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return null;
+        const view = this.camera.matrixWorldInverse.elements;
+        const proj = this.camera.projectionMatrix.elements;
+        const cam = this.camera.position;
+        const camLen = Math.hypot(cam.x, cam.y, cam.z);
+        const draw = this.pointGeo.drawRange;
+        const i0 = draw.start | 0;
+        const i1 = Math.min(n, i0 + (draw.count | 0));
+
+        const project = (ui, vi, flipW, ox, oy) => {
+            const freq = aux[ui];
+            const inten = aux[ui + 1];
+            const birth = aux[ui + 2];
+            if (!(freq > 1000)) return null;
+            const age = Math.max(now - birth, 0);
+            let decay;
+            if (tau < 0) {
+                if (age >= u.uStampWindow.value) return null;
+                decay = 1;
+            } else {
+                decay = tau > 0 ? Math.exp(-age / tau) : 1;
+            }
+            const lvl = Math.pow(Math.min(Math.max(inten, 0), 1), gain);
+            let alpha = lvl * 0.55 * decay;
+            if (alpha < 0.004) return null;
+
+            const sf = sfK * freq;
+            const uvx = (grad[vi] + ox) / sf;
+            const uvy = (grad[vi + 1] + oy) / sf;
+            const r2 = uvx * uvx + uvy * uvy;
+            if (r2 > 1) return null;
+            const w = Math.sqrt(1 - r2) * flipW;
+            let x = uvx, y = uvy, z = w;
+            const qx = quat[ui], qy = quat[ui + 1], qz = quat[ui + 2], qw = quat[ui + 3];
+            [x, y, z] = qrot(qx, qy, qz, qw, x, y, z);
+            let xn = x, yn = y, zn = z;
+            [xn, yn, zn] = qrot(qv.x, qv.y, qv.z, qv.w, x, y, z);
+            if (zn < 0) alpha *= morph;
+
+            const ax = xn * flipX * 0.5 + 0.5;
+            const ay = 0.5 - yn * 0.5;
+            const mx = (ax - 0.5) * extrap + 0.5;
+            const my = (ay - 0.5) * extrap + 0.5;
+            const topx = c0.x + (c1.x - c0.x) * mx, topy = c0.y + (c1.y - c0.y) * mx;
+            const botx = c3.x + (c2.x - c3.x) * mx, boty = c3.y + (c2.y - c3.y) * mx;
+            const spx = topx + (botx - topx) * my, spy = topy + (boty - topy) * my;
+            let ndx = spx * 2 - 1, ndy = 1 - spy * 2;
+
+            if (morph > 0.02) {
+                const px = x * 1.005, py = y * 1.005, pz = z * 1.005;
+                const vx = view[0] * px + view[4] * py + view[8] * pz + view[12];
+                const vy = view[1] * px + view[5] * py + view[9] * pz + view[13];
+                const vz = view[2] * px + view[6] * py + view[10] * pz + view[14];
+                const vw = view[3] * px + view[7] * py + view[11] * pz + view[15];
+                const cw = proj[3] * vx + proj[7] * vy + proj[11] * vz + proj[15] * vw;
+                if (cw <= 0) {
+                    if (morph > 0.5) return null;
+                } else {
+                    const cx = proj[0] * vx + proj[4] * vy + proj[8] * vz + proj[12] * vw;
+                    const cy = proj[1] * vx + proj[5] * vy + proj[9] * vz + proj[13] * vw;
+                    const sx = cx / cw, sy = cy / cw;
+                    ndx = ndx * (1 - morph) + sx * morph;
+                    ndy = ndy * (1 - morph) + sy * morph;
+                    if (morph > 0.5 && camLen > 0.1) {
+                        const tx = cam.x - x, ty = cam.y - y, tz = cam.z - z;
+                        const tl = Math.hypot(tx, ty, tz) || 1;
+                        const facing = (x * tx + y * ty + z * tz) / tl;
+                        const tf = smoothstep(-0.15, 0.15, facing);
+                        alpha *= 0.18 + 0.82 * tf;
+                    }
+                }
+            }
+            if (alpha < 0.004) return null;
+            const px = (ndx * 0.5 + 0.5) * rect.width + rect.left;
+            const py = (1 - (ndy * 0.5 + 0.5)) * rect.height + rect.top;
+            const rad = Math.max(22, u.uPointSize.value * (0.35 + 0.65 * lvl));
+            return { freq, inten, score: inten * decay, dx: clientX - px, dy: clientY - py, rad };
+        };
+
+        const bestIn = (ox, oy, flipW) => {
+            let best = null;
+            for (let i = i0; i < i1; i++) {
+                const hit = project(i * 4, i * 2, flipW, ox, oy);
+                if (!hit) continue;
+                if (hit.dx * hit.dx + hit.dy * hit.dy > hit.rad * hit.rad) continue;
+                if (!best || hit.score > best.score) best = hit;
+            }
+            return best;
+        };
+
+        let best = bestIn(0, 0, 1);
+        if (this.showBottom && morph > 0.02) {
+            const b = bestIn(0, 0, -1);
+            if (b && (!best || b.score > best.score)) best = b;
+        }
+        if (!best && this.showMirrors && morph > 0.02) {
+            for (const [ox, oy] of this.mirrorOffs) {
+                const b = bestIn(ox, oy, 1);
+                if (b && (!best || b.score > best.score)) best = b;
+                if (!(this.showBottom)) continue;
+                const c = bestIn(ox, oy, -1);
+                if (c && (!best || c.score > best.score)) best = c;
+            }
+        }
+        return best ? { freq: best.freq, inten: best.inten, score: best.score } : null;
+    }
+
+    /* Same LUT lookup the point shader uses, so a cursor affordance matches
+     * the cluster it is sitting on. */
+    pointColor(freq, inten) {
+        const u = this.pointUniforms;
+        const lut = u.uLut.value.image.data;
+        const mode = u.uColorMode.value | 0;
+        let t = 0;
+        if (mode === 0) {
+            if (u.uChanMap.value > 0.5) {
+                const tex = u.uFreqT.value.image.data;
+                const i = Math.max(0, Math.min(HW_SPAN - 1, Math.floor(freq - HW_LO)));
+                if (tex[i * 4 + 3] < 128) return [71, 76, 87];
+                t = tex[i * 4] / 255;
+            } else {
+                const lo = u.uFreqLo.value, hi = u.uFreqHi.value;
+                t = (freq - lo) / Math.max(hi - lo, 1);
+            }
+        } else if (mode === 1) {
+            const g = u.uGain.value;
+            t = Math.pow(Math.min(Math.max(inten, 0), 1), g);
+        } else {
+            const d = Math.abs(freq - u.uTargetFreq.value) / Math.max(u.uTargetWidth.value, 0.1);
+            if (d > 1) return [71, 76, 87];
+            t = 1 - d;
+        }
+        t = Math.max(0, Math.min(1, t));
+        const i = Math.max(0, Math.min(255, Math.round(t * 255))) * 4;
+        return [lut[i], lut[i + 1], lut[i + 2]];
     }
 
     // ------------------------------------------------------------------

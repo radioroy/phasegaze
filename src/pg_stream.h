@@ -15,6 +15,8 @@
 enum {
     PG_FRAME_POINTS   = 0,   /* payload: pg_point_t[count] */
     PG_FRAME_SPECTRUM = 1,   /* payload: float[count] avg energy 0..1 */
+    PG_FRAME_VIDEO    = 2,   /* payload: one JPEG, count = bytes.
+                              * lo_start = carrier, MHz. fps = delivered. */
 };
 
 typedef struct __attribute__((packed)) {

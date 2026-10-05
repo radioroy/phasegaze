@@ -11,7 +11,7 @@
 #include "external/mongoose.h"
 #include "pg_stream.h"
 
-#define SLOTS      2
+#define SLOTS      3
 #define POINT_SLOT 0
 #define SLOT_CAP   (1u << 20)   /* 1 MB per slot, far above worst case */
 #define STATE_CAP  4096
