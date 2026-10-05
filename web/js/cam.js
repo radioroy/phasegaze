@@ -73,10 +73,9 @@ export class Cam {
             // Every current browser gates getUserMedia on a secure context;
             // localhost is the only insecure origin they trust.
             title = 'HTTPS REQUIRED';
-            msg = 'This page is on HTTP, so no browser will release the ' +
-                  'camera — it never even prompts. Install the QuadRF ' +
-                  'certificate from the setup page, then reopen PhaseGaze ' +
-                  'over HTTPS.';
+            msg = 'This page is on HTTP, so the camera feed is not ' +
+                  'available. Install the QuadRF certificate from the ' +
+                  'setup page, then reopen PhaseGaze over HTTPS.';
         } else if (name === 'NotAllowedError' || name === 'SecurityError') {
             title = 'CAMERA DENIED';
             msg = `Allow camera for ${location.host} in this browser's site ` +
