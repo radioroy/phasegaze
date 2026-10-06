@@ -11,6 +11,10 @@ WorkingDirectory=/var/lib/quadrf/demos
 ExecStart=/usr/bin/quadrf-phasegaze --port 8001 --web /usr/share/quadrf/phasegaze
 # LO tuner thread is SCHED_FIFO so each retune stays inside its 438 us span slot.
 LimitRTPRIO=60
+# The sweep pins the MAX2851 VCO sub-band (Main19 VAS_MODE=0). Hand the
+# synths back in automatic VAS even after a crash or SIGKILL; '-' keeps an
+# older quadrf-jtag without --vas-auto from failing the stop.
+ExecStopPost=-/usr/bin/quadrf-jtag --vas-auto
 KillMode=control-group
 KillSignal=SIGINT
 TimeoutStopSec=5
