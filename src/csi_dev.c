@@ -941,6 +941,28 @@ int csi_dev_video_front_end(csi_dev_t *d)
         return -1;
     return 0;
 }
+int csi_dev_wifi_front_end(csi_dev_t *d)
+{
+    uint16_t v2e = 0;
+    if (jtag_read(d, 0x2E, &v2e) != 0)
+        v2e = 0;
+    /* 0x2E bit0 autosteer off, bit1 8.8 MHz test tone off */
+    v2e = (uint16_t)((v2e | 0x0001u) & ~0x0002u);
+    if (jtag_write(d, 0x2E, v2e) != 0)
+        return -1;
+    if (jtag_write(d, 0x25, 0x0000) != 0) /* interleave off: four antennas summed */
+        return -1;
+    if (jtag_write(d, 0x27, 12) != 0)     /* k=12 -> 240/12 = 20 MHz digital BW */
+        return -1;
+    /* Bit 7 of 0x6A is the FPGA AGC. 0x6B is the amplitude target,
+     * 180 * 10^(-14/20) = 36. */
+    if (jtag_write(d, 0x6A, 0x0080) != 0)
+        return -1;
+    if (jtag_write(d, 0x6B, 36) != 0)
+        return -1;
+    return 0;
+}
+
 
 int csi_dev_set_gain(csi_dev_t *d, int gain)
 {

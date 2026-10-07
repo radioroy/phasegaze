@@ -67,8 +67,9 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 /* ---------- HUD ---------- */
 #fps { position: absolute; left: 8px; bottom: 8px; z-index: 6; font-size: 10px;
     letter-spacing: 0.1em; color: var(--dim); pointer-events: none; text-shadow: 0 1px 2px #000; }
-#status { position: absolute; right: 8px; bottom: 8px; z-index: 6; font-size: 10px;
-    letter-spacing: 0.1em; color: var(--dim); pointer-events: none; text-shadow: 0 1px 2px #000; }
+#status { position: absolute; right: 8px; bottom: 42px; z-index: 6; font-size: 10px;
+    letter-spacing: 0.1em; color: var(--dim); pointer-events: none; text-shadow: 0 1px 2px #000;
+    text-align: right; }
 #status.warn { color: var(--amber); }
 #status.lost { color: var(--danger); }
 #hint { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%);
@@ -83,12 +84,13 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     padding: 9px 2px; font: inherit; font-size: 11px; letter-spacing: 0.18em;
     cursor: pointer; text-shadow: 0 1px 2px #000; }
 #hold-tune { display: flex; align-items: stretch; background: var(--bg);
-    border: 1px solid var(--line-hi); }
+    border: 1px solid var(--line-hi); height: 33px; box-sizing: border-box; }
 #hold-dn, #hold-up { background: none; color: var(--txt); border: none;
-    padding: 9px 11px; font: inherit; font-size: 13px; letter-spacing: 0;
+    height: 100%; padding: 0 10px; display: flex; align-items: center; justify-content: center;
+    font: inherit; font-size: 13px; letter-spacing: 0;
     cursor: pointer; }
 #hold-dn:disabled, #hold-up:disabled { opacity: 0.35; cursor: default; }
-#hold-mhz { width: 58px; padding: 0; text-align: center;
+#hold-mhz { width: 58px; height: 100%; padding: 0; text-align: center;
     background: none; color: #e8ece8; border: none;
     font: inherit; font-size: 13px; letter-spacing: 0.04em;
     user-select: text; -webkit-user-select: text; }
@@ -121,10 +123,15 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     background: #f2f6f2; box-shadow: 0 0 0 1px rgba(0,0,0,0.7); }
 #aim-x i:first-child { transform: rotate(45deg); }
 #aim-x i:last-child { transform: rotate(-45deg); }
-#vid-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
-    background: var(--bg); border-bottom: 1px solid var(--line); cursor: grab;
-    touch-action: none; }
-#vid-title { flex: 1; font-size: 11px; letter-spacing: 0.12em; }
+#vid-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px;
+    background: var(--bg); border-bottom: 1px solid var(--line-hi); cursor: grab;
+    touch-action: none; user-select: none; }
+#vid-bar-left { display: flex; align-items: center; gap: 8px; }
+#vid-label { font-size: 11px; font-weight: 700; letter-spacing: 0.16em; color: var(--acc); }
+#vid-title { font-size: 10px; padding: 2px 6px; background: var(--bg);
+    border: 1px solid var(--line-hi); color: var(--txt); letter-spacing: 0.08em;
+    cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+#vid-title:hover { border-color: var(--acc); color: var(--acc); }
 #vid-fps { font-size: 10px; color: var(--dim); letter-spacing: 0.1em; }
 #vid-close { background: var(--bg); color: var(--txt); border: 1px solid var(--line-hi);
     font: inherit; font-size: 10px; letter-spacing: 0.14em; padding: 4px 8px;
@@ -152,7 +159,8 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 #hold-charge.on { display: block; }
 
 .hbtn { position: absolute; z-index: 7; background: var(--bg); border: 1px solid var(--line-hi);
-    color: var(--txt); padding: 9px 13px; font: inherit; font-size: 11px; letter-spacing: 0.15em;
+    color: var(--txt); height: 33px; padding: 0 13px; display: inline-flex; align-items: center; justify-content: center;
+    box-sizing: border-box; font: inherit; font-size: 11px; letter-spacing: 0.15em;
     cursor: pointer; transition: border-color 0.15s, color 0.15s; }
 .hbtn:active { border-color: var(--acc); }
 .hbtn.on { color: var(--acc-ink); background: var(--acc); border-color: var(--acc); }
@@ -161,8 +169,8 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 #hud-left { left: 8px; }
 #hud-right { right: 8px; }
 #hud-left .hbtn, #hud-right .hbtn { position: relative; }
-#hud-br { position: absolute; right: 8px; bottom: 26px; z-index: 7; display: flex; gap: 6px; }
-#hud-br .hbtn { position: relative; padding: 4px 8px; font-size: 10px;
+#hud-br { position: absolute; right: 8px; bottom: 8px; z-index: 7; display: flex; gap: 6px; }
+#hud-br .hbtn { position: relative; height: auto; padding: 4px 8px; font-size: 10px;
     letter-spacing: 0.12em; }
 
 /* gain slider (custom vertical) */
@@ -231,6 +239,11 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     touch-action: none; }
 .tile[data-bw="20"] { font-size: 7px; }
 .tile.on { border-color: var(--acc); color: var(--acc); background: var(--acc-soft); }
+.tile.tuned { border-color: #58a6ff !important; color: #fff !important; background: rgba(88, 166, 255, 0.35) !important; box-shadow: 0 0 6px rgba(88, 166, 255, 0.5); z-index: 5; }
+.ntsc-ch.tuned { z-index: 6; }
+.ntsc-ch.tuned polygon { fill: rgba(210, 153, 34, 0.45) !important; stroke: #d29922 !important; filter: drop-shadow(0 0 4px #d29922); }
+.ntsc-ch.tuned .ntsc-num { color: #fff !important; font-weight: 700; }
+.freq-tune-hint { font-size: 9px; letter-spacing: 0.12em; color: var(--acc); margin-bottom: 4px; padding: 2px 6px; background: rgba(255,255,255,0.04); border-left: 2px solid var(--acc); }
 
 /* analog FPV chart: five bands, frequency-aligned, shared axis */
 #ntsc-chart { margin-top: 2px; }
@@ -339,6 +352,73 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 .sweep-ed input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .sweep-ed .dash, .sweep-ed .unit { color: var(--dim); font-size: 11px; letter-spacing: 0.12em; }
 
+
+/* ============ WI-FI DEMOD & INSPECTOR UI ============ */
+#hold-wifi { background: var(--bg); border: 1px solid var(--line-hi); color: var(--txt);
+    padding: 9px 12px; font: inherit; font-size: 11px; letter-spacing: 0.15em; cursor: pointer;
+    transition: all 0.15s ease; text-shadow: 0 1px 2px #000; }
+#hold-wifi:hover, #hold-wifi:active { border-color: #58a6ff; color: #58a6ff; }
+#hold-watch { background: var(--bg); border: 1px solid var(--line-hi); color: var(--txt);
+    padding: 9px 12px; font: inherit; font-size: 11px; letter-spacing: 0.15em; cursor: pointer;
+    transition: all 0.15s ease; text-shadow: 0 1px 2px #000; }
+#hold-watch:hover { border-color: var(--amber); color: var(--amber); }
+
+#wifi-win { display: none; position: absolute; left: 8px; bottom: 36px; z-index: 10;
+    width: min(880px, calc(100vw - 20px)); height: min(520px, calc(100vh - 60px));
+    background: var(--bg); border: 1px solid var(--line-hi);
+    flex-direction: column; overflow: hidden; font: inherit; }
+#wifi-win.show { display: flex; }
+
+#wifi-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 6px 10px; background: var(--bg); border-bottom: 1px solid var(--line-hi);
+    cursor: grab; touch-action: none; user-select: none; }
+#wifi-bar-left { display: flex; align-items: center; gap: 8px; }
+#wifi-title { font-size: 11px; font-weight: 700; letter-spacing: 0.16em; color: var(--acc); }
+#wifi-ch-badge { font-size: 10px; padding: 2px 6px; background: var(--bg);
+    border: 1px solid var(--line-hi); color: var(--txt); letter-spacing: 0.08em;
+    cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+#wifi-ch-badge:hover { border-color: var(--acc); color: var(--acc); }
+#wifi-bw-badge { font-size: 8.5px; padding: 1px 4px; color: var(--dim); letter-spacing: 0.06em;
+    border: 1px solid var(--line); border-radius: 2px; }
+
+#wifi-bar-center { display: flex; align-items: center; gap: 12px; font-size: 10px; color: var(--dim); letter-spacing: 0.08em; }
+.wifi-kpi { display: inline-flex; align-items: center; gap: 4px; }
+.wifi-kpi b { color: var(--txt); font-weight: 600; }
+
+#wifi-bar-right { display: flex; align-items: center; gap: 6px; }
+#wifi-bar-right button { background: var(--bg); color: var(--txt); border: 1px solid var(--line-hi);
+    font: inherit; font-size: 10px; letter-spacing: 0.12em; padding: 3px 8px; cursor: pointer; text-shadow: 0 1px 2px #000; }
+#wifi-bar-right button:hover { border-color: var(--acc); color: var(--acc); }
+
+#wifi-body { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--bg); }
+
+
+
+#wifi-table-container { flex: 1; min-height: 140px; overflow-y: auto; overflow-x: auto;
+    border-bottom: 1px solid var(--line-hi); background: var(--bg); }
+#wifi-packet-table { width: 100%; border-collapse: collapse; font-size: 11px; text-align: left; }
+#wifi-packet-table thead { position: sticky; top: 0; background: var(--bg); z-index: 2; border-bottom: 1px solid var(--line-hi); }
+#wifi-packet-table th { padding: 4px 6px; font-weight: 600; color: var(--dim); letter-spacing: 0.08em; font-size: 9px; }
+#wifi-packet-table tbody tr { border-bottom: 1px solid var(--line); cursor: pointer; transition: background 0.1s; }
+#wifi-packet-table tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
+#wifi-packet-table tbody tr.selected { background: rgba(255, 255, 255, 0.07); outline: 1px solid var(--acc); }
+#wifi-packet-table td { padding: 3px 6px; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; color: var(--txt); }
+
+.badge-fcs-ok { color: var(--acc); font-weight: 600; }
+.badge-fcs-bad { color: var(--dim); }
+.type-beacon { color: var(--acc); font-weight: 600; }
+.type-probe { color: var(--txt); }
+.type-data { color: var(--dim); }
+.type-ctrl { color: var(--dim); }
+
+#wifi-detail-pane { height: 115px; overflow-y: auto; padding: 6px 10px; background: var(--bg); font-size: 10px; font-family: ui-monospace, SFMono-Regular, monospace; }
+#wifi-detail-title { font-size: 9px; font-weight: 600; letter-spacing: 0.14em; color: var(--dim); margin-bottom: 4px; }
+#wifi-detail-content { line-height: 1.45; color: var(--dim); }
+.tree-node { margin: 2px 0; color: var(--txt); font-weight: 600; }
+.tree-node b { color: var(--acc); font-weight: 600; }
+.tree-leaf { padding-left: 10px; color: var(--dim); }
+.tree-leaf span { color: var(--txt); }
+
 </style>
 <script type="importmap">
 { "imports": {
@@ -357,24 +437,70 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 <div id="fps"></div>
 <div id="hint">TAP AND HOLD TO DWELL, DRAG TO MOVE, SCROLL TO ZOOM</div>
 <div id="hold-row">
-    <button type="button" id="hold-resume" title="Resume the sweep">HOLD</button>
     <div id="hold-tune">
         <button type="button" id="hold-dn" title="Tune down 1 MHz">−</button>
         <input id="hold-mhz" type="number" inputmode="numeric" step="1" min="1000" max="8000" title="Hold LO, MHz">
         <button type="button" id="hold-up" title="Tune up 1 MHz">+</button>
     </div>
-    <button type="button" id="hold-watch" title="Decode this carrier">WATCH</button>
 </div>
 <div id="aim-x"><i></i><i></i></div>
 <div id="vid-win">
     <div id="vid-bar">
-        <span id="vid-title">VIDEO</span>
-        <span id="vid-fps"></span>
-        <button type="button" id="vid-close">CLOSE</button>
+        <div id="vid-bar-left">
+            <span id="vid-label">NTSC DECODE</span>
+            <span id="vid-title" title="Click to select NTSC channel in FREQ menu">5645 MHz</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+            <span id="vid-fps"></span>
+            <button type="button" id="vid-close">CLOSE</button>
+        </div>
     </div>
     <div id="vid-stage">
         <img id="vid-img" alt="">
         <div id="vid-msg">TUNING</div>
+    </div>
+</div>
+<div id="wifi-win">
+    <div id="wifi-bar">
+        <div id="wifi-bar-left">
+            <span id="wifi-title">WI-FI DECODE</span>
+            <span id="wifi-ch-badge">CH 36 · 5180 MHz</span>
+            <span id="wifi-bw-badge">20 MHz</span>
+        </div>
+        <div id="wifi-bar-center">
+            <span class="wifi-kpi" id="wifi-kpi-count"><b>0</b> PKTS</span>
+            <span class="wifi-kpi" id="wifi-kpi-snr">SNR: <b>--</b> dB</span>
+            <span class="wifi-kpi" id="wifi-kpi-evm">EVM: <b>--</b> dB</span>
+        </div>
+        <div id="wifi-bar-right">
+            <button type="button" id="wifi-clear" title="Clear packet log">CLEAR</button>
+            <button type="button" id="wifi-close" title="Close Wi-Fi demodulator">CLOSE</button>
+        </div>
+    </div>
+    <div id="wifi-body">
+        <div id="wifi-table-container">
+            <table id="wifi-packet-table">
+                <thead>
+                    <tr>
+                        <th style="width:45px">#</th>
+                        <th style="width:65px">TIME</th>
+                        <th style="width:105px">TYPE</th>
+                        <th style="width:125px">BSSID</th>
+                        <th style="width:125px">SOURCE</th>
+                        <th style="width:125px">DEST</th>
+                        <th style="width:75px">RATE</th>
+                        <th style="width:60px">SNR</th>
+                        <th style="width:50px">LEN</th>
+                    </tr>
+                </thead>
+                <tbody id="wifi-packet-tbody">
+                </tbody>
+            </table>
+        </div>
+        <div id="wifi-detail-pane">
+            <div id="wifi-detail-title">PACKET INSPECTION</div>
+            <div id="wifi-detail-content">Select a packet from the table to inspect 802.11 MAC headers, Frame Control fields, and Management IEs.</div>
+        </div>
     </div>
 </div>
 <div id="hold-charge"></div>
@@ -383,6 +509,8 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 <div id="hud-left">
     <button class="hbtn" id="btn-freq">FREQ</button>
     <button class="hbtn" id="btn-color">COLOR</button>
+    <button class="hbtn" id="btn-wifi-top" title="Wi-Fi Packet Demodulator">D:WIFI</button>
+    <button class="hbtn" id="btn-ntsc-top" title="NTSC Analog Video Decoder">D:NTSC</button>
 </div>
 <div id="hud-right">
     <button class="hbtn" id="btn-cam">SPHERE</button>
@@ -417,11 +545,11 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 <!-- ============ FREQ popover ============ -->
 <div class="hud-pop" id="freq-pop">
     <div class="tabs">
-        <div class="tab on" id="ftab-range">RANGE</div>
-        <div class="tab" id="ftab-wifi">WIFI</div>
+        <div class="tab" id="ftab-range">RANGE</div>
+        <div class="tab on" id="ftab-wifi">WIFI</div>
         <div class="tab" id="ftab-ntsc">NTSC</div>
         <div id="tab-right">
-            <button class="tab" id="btn-fft">FFT</button>
+            <button class="tab on" id="btn-fft">FFT</button>
             <div id="tab-stack">
                 <button class="tab" id="freq-reset">RESET</button>
                 <div id="fft-side">
@@ -432,7 +560,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
         </div>
     </div>
 
-    <div id="freq-range">
+    <div id="freq-range" style="display:none">
         <div id="fft-block">
             <div id="fft-wrap">
                 <canvas id="fft-canvas"></canvas>
@@ -450,12 +578,14 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
         </div>
     </div>
 
-    <div id="freq-wifi" style="display:none">
+    <div id="freq-wifi">
+        <div id="wifi-tune-hint" class="freq-tune-hint" style="display:none">WI-FI DECODE ACTIVE · CLICK CHANNEL TO TUNE</div>
         <div id="wifi-views"></div>
         <div id="wifi-tiers"></div>
     </div>
 
     <div id="freq-ntsc" style="display:none">
+        <div id="ntsc-tune-hint" class="freq-tune-hint" style="display:none">NTSC DECODE ACTIVE · CLICK CHANNEL TO TUNE</div>
         <div id="ntsc-chart"></div>
         <div id="ntsc-watch">
             <input id="ntsc-mhz" type="number" inputmode="decimal" min="1000" max="8000" step="0.1" placeholder="MHZ">
@@ -496,7 +626,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     <div class="sect">DETECTION</div>
     <div class="srow"><label>CFAR THRESHOLD <span id="v-cfar"></span></label>
         <input type="range" id="s-cfar" min="3" max="15" step="0.5"></div>
-    <div class="srow"><label>CHANNEL BALANCE <span id="v-bal"></span></label>
+    <div class="srow"><label>CHANNEL BALANCE THRESHOLD <span id="v-bal"></span></label>
         <input type="range" id="s-bal" min="0" max="30" step="1"></div>
     <div class="srow"><label>PLANE-WAVE GATE <span id="v-clos"></span></label>
         <input type="range" id="s-clos" min="0" max="180" step="5"></div>
@@ -517,7 +647,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
         <input type="color" id="s-accent" value="#b8c4b8">
     </div>
 
-    <div class="sect">RF LOCK</div>
+    <div class="sect">SWEEP RANGE</div>
     <div class="srow"><label>PIN <span id="v-lock">NOT MEASURED</span></label></div>
     <div class="srow">
         <label>SWEEP</label>
@@ -529,7 +659,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
         </div>
     </div>
     <div class="actions">
-        <button class="abtn" id="s-lock">MEASURE LOCK</button>
+        <button class="abtn" id="s-lock">MEASURE PLL LOCK RANGE</button>
     </div>
 
     <div class="sect">SYSTEM</div>
@@ -539,6 +669,6 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     </div>
 </div>
 
-<script type="module" src="./app.js?v=pg98"></script>
+<script type="module" src="./app.js?v=pg104"></script>
 </body>
 </html>

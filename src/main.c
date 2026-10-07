@@ -32,6 +32,7 @@
 #include "server.h"
 #include "pg_stream.h"
 #include "video.h"
+#include "wifi.h"
 #include "external/mongoose.h"
 
 #define DEVICE_PATH      "/dev/csi_stream0"
@@ -122,6 +123,12 @@ static double g_video_mhz;
 static double g_video_tuned;
 static int g_video_nudges;
 static char g_video_err[80];
+static int g_wifi_mode;
+static int g_wifi_on;
+static double g_wifi_mhz;
+static int g_wifi_ch;
+static double g_wifi_tuned;
+static char g_wifi_err[80];
 static atomic_int g_csi_open;
 static int g_tuner_up;
 static atomic_int g_park;
@@ -314,6 +321,35 @@ static int on_control(const char *msg, size_t len, void *user)
         pthread_cond_signal(&g_cmd_cv);
         pthread_mutex_unlock(&g_cmd_mtx);
         changed = 1;
+    } else if (strcmp(type, "wifi") == 0) {
+        double d = 0;
+        if ((mg_json_get_num(json, "$.mhz", &d) || mg_json_get_num(json, "$.freq_mhz", &d)) && d >= 4480 && d <= 6740) {
+            int ch = 0;
+            const char *band = NULL;
+            double snap_mhz = wifi_snap_mhz(d, &ch, &band);
+            pthread_mutex_lock(&g_set.mtx);
+            if (!g_lock_busy) {
+                g_wifi_mode = 1;
+                g_wifi_mhz = snap_mhz;
+                g_wifi_ch = ch;
+                g_wifi_err[0] = 0;
+                changed = 1;
+            }
+            pthread_mutex_unlock(&g_set.mtx);
+            if (changed) {
+                pthread_mutex_lock(&g_cmd_mtx);
+                g_cmd = 3;
+                g_cmd_mhz = snap_mhz;
+                pthread_cond_signal(&g_cmd_cv);
+                pthread_mutex_unlock(&g_cmd_mtx);
+            }
+        }
+    } else if (strcmp(type, "wifi_stop") == 0) {
+        pthread_mutex_lock(&g_cmd_mtx);
+        g_cmd = 4;
+        pthread_cond_signal(&g_cmd_cv);
+        pthread_mutex_unlock(&g_cmd_mtx);
+        changed = 1;
     } else if (strcmp(type, "lock_cal") == 0) {
         int start = 0;
         pthread_mutex_lock(&g_set.mtx);
@@ -351,11 +387,20 @@ static void state_json(char *buf, size_t cap, void *user)
         verr[vj++] = (char)c;
     }
     verr[vj] = 0;
+    char werr[80];
+    size_t wj = 0;
+    for (size_t i = 0; g_wifi_err[i] && wj + 1 < sizeof werr; i++) {
+        unsigned char c = (unsigned char)g_wifi_err[i];
+        if (c < 32 || c == '"' || c == '\\') continue;
+        werr[wj++] = (char)c;
+    }
+    werr[wj] = 0;
+    const char *current_mode = g_video_mode ? "video" : (g_wifi_mode ? "wifi" : "sweep");
     int n = snprintf(buf, cap,
         "{\"type\":\"state\",\"lo_start\":%.1f,\"lo_end\":%.1f,"
         "\"hw_min\":%.1f,\"hw_max\":%.1f,\"lo_step\":%.1f,"
         "\"lock_lo\":%d,\"lock_hi\":%d,\"lock_busy\":%d,\"lock_err\":%d,"
-        "\"mode\":\"%s\",\"video_mhz\":%.1f,\"video_err\":\"%s\","
+        "\"mode\":\"%s\",\"video_mhz\":%.1f,\"video_err\":\"%s\",\"wifi_mhz\":%.1f,\"wifi_ch\":%d,\"wifi_err\":\"%s\","
         "\"gain\":%d,\"output_fraction\":%.3f,"
         "\"closure_max\":%.3f,\"balance_db\":%.1f,\"spur_mask\":%d,"
         "\"bg_norm\":%d,\"cfar_db\":%.2f,\"spur_margin\":%.2f,"
@@ -371,7 +416,7 @@ static void state_json(char *buf, size_t cap, void *user)
         g_set.lo_start, g_set.lo_end,
         g_hw_lo, g_hw_hi, LO_STEP_MHZ,
         g_lock_lo, g_lock_hi, g_lock_busy, g_lock_err,
-        g_video_mode ? "video" : "sweep", g_video_mhz, verr,
+        current_mode, g_video_mhz, verr, g_wifi_mhz, g_wifi_ch, werr,
         g_set.gain, g_set.output_fraction,
         (double)g_set.closure_max, (double)g_set.balance_db, g_set.spur_mask,
         g_set.bg_norm, (double)g_set.cfar_db, (double)g_set.spur_margin,
@@ -380,8 +425,8 @@ static void state_json(char *buf, size_t cap, void *user)
         (unsigned long long)__atomic_load_n(&g_gstats.rej_closure, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&g_gstats.rej_spur, __ATOMIC_RELAXED),
         (double)g_fps, g_last_points, g_adc_peak, (double)g_adc_rms,
-        g_video_mode ? -1 : g_dev.analog_lna_db,
-        g_video_mode ? -1 : g_dev.analog_vga_db,
+        (g_video_mode || g_wifi_mode) ? -1 : g_dev.analog_lna_db,
+        (g_video_mode || g_wifi_mode) ? -1 : g_dev.analog_vga_db,
         ts.rt, (unsigned long long)ts.spans, (unsigned long long)ts.retunes,
         (unsigned long long)ts.deferred, (unsigned long long)ts.late_land,
         (unsigned long long)ts.resyncs, ts.span_us, ts.min_late_us, ts.write_us,
@@ -1180,6 +1225,120 @@ static void video_fail(void)
     video_restore_sweep(err[0] ? err : "no picture");
 }
 
+static void wifi_set_status(int mode, double mhz, int ch, const char *err)
+{
+    pthread_mutex_lock(&g_set.mtx);
+    g_wifi_mode = mode;
+    g_wifi_mhz = mhz;
+    g_wifi_ch = ch;
+    snprintf(g_wifi_err, sizeof g_wifi_err, "%s", err ? err : "");
+    pthread_mutex_unlock(&g_set.mtx);
+}
+
+static void wifi_restore_sweep(const char *err)
+{
+    g_wifi_on = 0;
+    g_wifi_tuned = 0;
+    wifi_pipeline_stop();
+    if (!g_quit && !g_video_on)
+        radio_to_sweep();
+    wifi_set_status(0, 0, 0, err ? err : "");
+}
+
+static int wifi_lock_lo(double mhz)
+{
+    if (!atomic_load(&g_csi_open)) {
+        int ok = 0;
+        for (int i = 0; i < 10 && !g_quit; i++) {
+            if (csi_dev_open(&g_dev, DEVICE_PATH) == 0) {
+                ok = 1;
+                break;
+            }
+            usleep(150000);
+        }
+        if (!ok)
+            return -1;
+        atomic_store(&g_csi_open, 1);
+    }
+    int rc = csi_dev_set_lo(&g_dev, mhz);
+    if (rc == 0)
+        rc = csi_dev_wifi_front_end(&g_dev);
+    csi_dev_close(&g_dev);
+    atomic_store(&g_csi_open, 0);
+    return rc;
+}
+
+static void wifi_enter(double mhz)
+{
+    if (g_quit) return;
+    pthread_mutex_lock(&g_set.mtx);
+    int busy = g_lock_busy;
+    pthread_mutex_unlock(&g_set.mtx);
+    if (busy) {
+        wifi_set_status(0, mhz, 0, "lock measure");
+        return;
+    }
+    if (g_video_on) {
+        video_restore_sweep("");
+    }
+    if (g_wifi_on && !wifi_pipeline_dead() && fabs(g_wifi_tuned - mhz) < 0.05)
+        return;
+
+    if (!g_wifi_on) {
+        if (!workers_quiesce()) {
+            wifi_set_status(0, mhz, 0, "sweep busy");
+            return;
+        }
+        if (g_quit) {
+            workers_release();
+            return;
+        }
+        g_wifi_on = 1;
+        tuner_stop();
+        g_tuner_up = 0;
+        pthread_mutex_lock(&g_frame_mtx);
+        for (int i = 0; i < N_ACC; i++)
+            g_acc[i].used = 0;
+        pthread_mutex_unlock(&g_frame_mtx);
+    } else {
+        wifi_pipeline_stop();
+    }
+
+    if (g_quit) return;
+    int ch = 0;
+    const char *band = NULL;
+    double snap_mhz = wifi_snap_mhz(mhz, &ch, &band);
+    if (wifi_lock_lo(snap_mhz) != 0) {
+        wifi_restore_sweep("front end");
+        return;
+    }
+    if (wifi_pipeline_start(snap_mhz) != 0) {
+        char err[80];
+        wifi_pipeline_error(err, sizeof err);
+        wifi_restore_sweep(err[0] ? err : "no packets");
+        return;
+    }
+    g_wifi_tuned = snap_mhz;
+    wifi_set_status(1, snap_mhz, ch, "");
+    fprintf(stderr, "phasegaze: wifi %.1f MHz (ch %d)\n", snap_mhz, ch);
+}
+
+static void wifi_leave(void)
+{
+    if (!g_wifi_on && !g_wifi_mode)
+        return;
+    fprintf(stderr, "phasegaze: sweep (exit wifi)\n");
+    wifi_restore_sweep("");
+}
+
+static void wifi_fail(void)
+{
+    char err[80];
+    wifi_pipeline_error(err, sizeof err);
+    fprintf(stderr, "phasegaze: wifi ended\n");
+    wifi_restore_sweep(err[0] ? err : "no packets");
+}
+
 int main(int argc, char **argv)
 {
     int port = 8001;
@@ -1295,6 +1454,10 @@ int main(int argc, char **argv)
             }
         } else if (cmd == 2)
             video_leave();
+        else if (cmd == 3)
+            wifi_enter(mhz);
+        else if (cmd == 4)
+            wifi_leave();
         if (g_video_on && g_video_nudges < 2) {
             double nudge = 0;
             if (video_steer_take(&nudge)) {
@@ -1305,13 +1468,17 @@ int main(int argc, char **argv)
         }
         if (g_video_on && video_pipeline_dead())
             video_fail();
-        if (!atomic_load(&g_csi_open) && !g_video_on)
+        if (g_wifi_on && wifi_pipeline_dead())
+            wifi_fail();
+        if (!atomic_load(&g_csi_open) && !g_video_on && !g_wifi_on)
             radio_to_sweep();
         server_broadcast_state();
     }
 
     video_pipeline_stop();
     g_video_on = 0;
+    wifi_pipeline_stop();
+    g_wifi_on = 0;
     /* Park stays set if the ring is already unmapped. g_quit lets the
      * wait return; clearing park here would send a worker into it. */
     pthread_mutex_lock(&g_park_mtx);

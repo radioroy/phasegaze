@@ -12,6 +12,7 @@ export class Net {
         this.onPoints = null;
         this.onSpectrum = null;
         this.onVideo = null;
+        this.onWifi = null;
         this.onState = null;
         this.onStatus = null;
         this._timer = null;
@@ -80,6 +81,14 @@ export class Net {
             const n = header.count;
             if (n < 64 || buf.byteLength < HDR_BYTES + n) return;
             this.onVideo(header, new Uint8Array(buf, HDR_BYTES, n));
+        } else if (header.type === 3 && this.onWifi) {
+            const n = header.count;
+            if (buf.byteLength < HDR_BYTES + n) return;
+            const text = new TextDecoder('utf-8').decode(new Uint8Array(buf, HDR_BYTES, n));
+            try {
+                const pkt = JSON.parse(text);
+                this.onWifi(header, pkt);
+            } catch (_) {}
         }
     }
 

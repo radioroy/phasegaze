@@ -20,6 +20,8 @@ enum {
                               * lo_end = aim u, reserved = aim v (float bits).
                               * |u| > 1 means the autosteer solve is not
                               * on the hemisphere this frame. */
+    PG_FRAME_WIFI     = 3,   /* payload: utf-8 JSON packet string, count = bytes.
+                              * lo_start = carrier MHz, lo_end = channel num */
 };
 
 typedef struct __attribute__((packed)) {

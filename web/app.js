@@ -2,8 +2,8 @@
 // overlay (CAM); no IMU, so AR points are stamped in the device frame.
 
 import { Net } from './js/net.js?v=pg89';
-import { VrfRenderer } from './js/render.js?v=pg90';
-import { Ui } from './js/ui.js?v=pg98';
+import { VrfRenderer } from './js/render.js?v=pg91';
+import { Ui } from './js/ui.js?v=pg104';
 
 const renderer = new VrfRenderer(document.getElementById('gl'));
 const net = new Net();
@@ -22,6 +22,7 @@ net.onPoints = (header, f32) => {
 };
 net.onSpectrum = (header, f32) => ui.onSpectrum(header, f32);
 net.onVideo = (header, jpeg) => ui.onVideoFrame(header, jpeg);
+net.onWifi = (header, pkt) => ui.onWifiPacket(header, pkt);
 net.onState = (st) => ui.onState(st);
 net.onStatus = (kind) => {
     ui.setStatus(kind);
@@ -69,11 +70,19 @@ function pgResume() {
 
 pgAttach();
 attachTimer = setInterval(pgAttach, 1000);
-window.addEventListener('pagehide', (e) => {
-    if (e.persisted) return;
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+        pgDetach();
+    } else if (document.visibilityState === 'visible') {
+        pgResume();
+    }
+});
+window.addEventListener('pagehide', () => {
     pgDetach();
 });
 window.addEventListener('beforeunload', pgDetach);
+window.addEventListener('freeze', pgDetach);
 window.addEventListener('pageshow', pgResume);
 window.addEventListener('resume', pgResume);
 

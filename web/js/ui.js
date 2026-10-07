@@ -5,7 +5,7 @@ import { NTSC_CHANNELS, NTSC_ROWS, NTSC_BASE_MHZ, NTSC_F0, NTSC_F1,
     NTSC_SCAN, ntscById, ntscChannelSpan, ntscTrapPoints } from './ntsc.js?v=pg79';
 import { SCHEMES, schemeCss, lutRgb } from './colors.js';
 import { Cam } from './cam.js';
-import { applyDrag, defaultCorners, sanitizeCorners, unmapPoint } from './cal.js';
+import { applyDrag, DEFAULT_CORNERS, defaultCorners, mapPoint, sanitizeCorners, unmapPoint } from './cal.js';
 
 const TARGET_LUTS = ['spectrum', 'iron', 'whitehot', 'greenhot', 'viridis'];
 
@@ -83,7 +83,7 @@ const DEFAULTS = {
     pulse: false, flip: false,
     mirrors: true, bottom: false, tiles: true, rings: false,
     scheme: 'spectrum', targetLut: 'iron', targetFreq: 5500, targetWidth: 40,
-    freqPin: true, wifiColor: 'band', freqTab: 'range',
+    freqPin: true, wifiColor: 'band', freqTab: 'wifi',
     fft: true, fftSpeed: 'fast', fftAgc: true,
     hwGain: 45,
     manualLo: HW_MIN, manualHi: HW_MAX,
@@ -152,7 +152,7 @@ export class Ui {
         if (typeof this.s.freqPin !== 'boolean') this.s.freqPin = true;
         if (typeof this.s.mirrors !== 'boolean') this.s.mirrors = true;
         if (typeof this.s.rings !== 'boolean') this.s.rings = false;
-        if (this.s.freqTab !== 'wifi' && this.s.freqTab !== 'ntsc') this.s.freqTab = 'range';
+        if (this.s.freqTab !== 'wifi' && this.s.freqTab !== 'ntsc') this.s.freqTab = 'wifi';
         if (!WIFI_COLOR.includes(this.s.wifiColor))
             this.s.wifiColor = this.s.wifiChan === true ? 'chan' : 'band';
         delete this.s.wifiChan;
@@ -216,6 +216,7 @@ export class Ui {
         this._bindPointer();
         this._bindHold();
         this._bindVideo();
+        this._bindWifi();
         this._bindHint();
         this._bindCal();
         this._bindCamFade();
@@ -314,8 +315,15 @@ export class Ui {
         root.setProperty('--acc-ink', accentInk(hex));
         root.setProperty('--acc-soft', `rgba(${r}, ${g}, ${b}, 0.28)`);
         this.renderer.setAccent(hex);
-        if ($('freq-pop').classList.contains('open') && this.s.fft)
-            this._drawFft();
+        if ($('freq-pop').classList.contains('open') && this.s.fft) {
+            if (!this._fftRafPending) {
+                this._fftRafPending = true;
+                requestAnimationFrame(() => {
+                    this._fftRafPending = false;
+                    this._drawFft();
+                });
+            }
+        }
     }
 
     _gateMsg() {
@@ -339,6 +347,24 @@ export class Ui {
     // HUD / menu
     // ==================================================================
 
+    _syncWifiTileTuned(mhz) {
+        if (!Number.isFinite(mhz)) return;
+        for (const el of document.querySelectorAll('#wifi-tiers .tile')) {
+            const f0 = parseFloat(el.dataset.f0), f1 = parseFloat(el.dataset.f1);
+            const isMatch = (mhz >= f0 && mhz <= f1);
+            el.classList.toggle('tuned', isMatch);
+        }
+    }
+
+    _syncNtscChTuned(fc) {
+        if (!Number.isFinite(fc)) return;
+        for (const el of document.querySelectorAll('#ntsc-chart .ntsc-ch')) {
+            const elFc = parseFloat(el.dataset.fc);
+            const isMatch = Math.abs(elFc - fc) < 1.0;
+            el.classList.toggle('tuned', isMatch);
+        }
+    }
+
     _bindHud() {
         $('btn-freq').onclick = (e) => {
             e.stopPropagation();
@@ -355,6 +381,30 @@ export class Ui {
             if ($('set-pop').classList.contains('open')) this._closeSet();
             else this._openSet();
         };
+        const wifiTop = $('btn-wifi-top');
+        if (wifiTop) {
+            wifiTop.onclick = (e) => {
+                e.stopPropagation();
+                if (this._wifing()) {
+                    this._stopWifi();
+                } else {
+                    const mhz = (this._hold && Number.isFinite(this._hold.freq)) ? this._hold.freq : 5180;
+                    this._wifiMhz(mhz);
+                }
+            };
+        }
+        const ntscTop = $('btn-ntsc-top');
+        if (ntscTop) {
+            ntscTop.onclick = (e) => {
+                e.stopPropagation();
+                if (this._watching()) {
+                    this._stopVideo();
+                } else {
+                    const mhz = (this._hold && Number.isFinite(this._hold.freq)) ? this._hold.freq : 5645;
+                    this._watchMhz(mhz, true);
+                }
+            };
+        }
         $('btn-mirror').onclick = () => {
             this.s.mirrors = !this.s.mirrors;
             $('btn-mirror').classList.toggle('on', this.s.mirrors);
@@ -554,35 +604,313 @@ export class Ui {
         cv.addEventListener('pointercancel', end);
     }
 
-    /* Correction vector feedback. The RF itself is the alignment reference,
-     * so nothing else is drawn on this layer. */
+    /* Calibration overlay visualization: shows warp grid, control handles,
+     * boresight alignment, calibration state badge, and active drag vectors. */
     _drawCal(d) {
         const cv = $('cal-layer');
+        if (!cv) return;
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
         const w = Math.round(innerWidth * dpr), h = Math.round(innerHeight * dpr);
         if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
         const ctx = cv.getContext('2d');
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, innerWidth, innerHeight);
+
+        if (!this.calOn) return;
+
         $('cal-tip').classList.toggle('hide', !!(d && d.moved));
-        if (!d || !d.moved) return;
+
+        const W = innerWidth;
+        const H = innerHeight;
         const acc = this.s.accent || ACCENT_DEFAULT;
-        ctx.strokeStyle = acc;
-        ctx.fillStyle = acc;
-        ctx.lineWidth = 2;
+        const corners = this.s.corners;
+        if (!corners || corners.length !== 4) return;
+
+        const hexToRgba = (hex, a) => {
+            if (!hex || typeof hex !== 'string') return `rgba(184, 196, 184, ${a})`;
+            let c = hex.replace('#', '');
+            if (c.length === 3) c = c.split('').map(x => x + x).join('');
+            const num = parseInt(c, 16);
+            if (isNaN(num)) return `rgba(184, 196, 184, ${a})`;
+            return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${a})`;
+        };
+
+        const drawRRect = (x, y, rw, rh, r) => {
+            if (ctx.roundRect) ctx.roundRect(x, y, rw, rh, r);
+            else ctx.rect(x, y, rw, rh);
+        };
+
+        ctx.save();
+
+        // 1. Perspective alignment grid (spans RF field of view across the screen)
+        const uSteps = [0.30, 0.40, 0.50, 0.60, 0.70];
+        const vSteps = [0.30, 0.40, 0.50, 0.60, 0.70];
+
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = hexToRgba(acc, 0.16);
+        ctx.setLineDash([4, 6]);
+
+        for (const u of uSteps) {
+            if (u === 0.50) continue;
+            const p0 = mapPoint(corners, u, 0.27);
+            const p1 = mapPoint(corners, u, 0.73);
+            ctx.beginPath();
+            ctx.moveTo(p0.x * W, p0.y * H);
+            ctx.lineTo(p1.x * W, p1.y * H);
+            ctx.stroke();
+        }
+        for (const v of vSteps) {
+            if (v === 0.50) continue;
+            const p0 = mapPoint(corners, 0.27, v);
+            const p1 = mapPoint(corners, 0.73, v);
+            ctx.beginPath();
+            ctx.moveTo(p0.x * W, p0.y * H);
+            ctx.lineTo(p1.x * W, p1.y * H);
+            ctx.stroke();
+        }
+
+        // Major axes at u=0.50 and v=0.50 (RF coordinate axes)
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = hexToRgba(acc, 0.35);
+
+        const vAxis0 = mapPoint(corners, 0.50, 0.27);
+        const vAxis1 = mapPoint(corners, 0.50, 0.73);
         ctx.beginPath();
-        ctx.moveTo(d.x0, d.y0);
-        ctx.lineTo(d.x, d.y);
+        ctx.moveTo(vAxis0.x * W, vAxis0.y * H);
+        ctx.lineTo(vAxis1.x * W, vAxis1.y * H);
         ctx.stroke();
-        ctx.fillRect(d.x0 - 4, d.y0 - 4, 8, 8);
+
+        const hAxis0 = mapPoint(corners, 0.27, 0.50);
+        const hAxis1 = mapPoint(corners, 0.73, 0.50);
+        ctx.beginPath();
+        ctx.moveTo(hAxis0.x * W, hAxis0.y * H);
+        ctx.lineTo(hAxis1.x * W, hAxis1.y * H);
+        ctx.stroke();
+
+        // 2. Control quad bounding box (the 4 quarter control points in screen space)
+        const cp0 = { x: corners[0].u * W, y: corners[0].v * H };
+        const cp1 = { x: corners[1].u * W, y: corners[1].v * H };
+        const cp2 = { x: corners[2].u * W, y: corners[2].v * H };
+        const cp3 = { x: corners[3].u * W, y: corners[3].v * H };
+
+        ctx.strokeStyle = hexToRgba(acc, 0.22);
+        ctx.setLineDash([3, 5]);
+        ctx.beginPath();
+        ctx.moveTo(cp0.x, cp0.y);
+        ctx.lineTo(cp1.x, cp1.y);
+        ctx.lineTo(cp2.x, cp2.y);
+        ctx.lineTo(cp3.x, cp3.y);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // 3. Corner control brackets (at the 4 quarter control points)
+        const ctrlPoints = [
+            { px: cp0.x, py: cp0.y, defX: DEFAULT_CORNERS[0].u * W, defY: DEFAULT_CORNERS[0].v * H, label: 'C0', dirX: 1, dirY: 1 },
+            { px: cp1.x, py: cp1.y, defX: DEFAULT_CORNERS[1].u * W, defY: DEFAULT_CORNERS[1].v * H, label: 'C1', dirX: -1, dirY: 1 },
+            { px: cp2.x, py: cp2.y, defX: DEFAULT_CORNERS[2].u * W, defY: DEFAULT_CORNERS[2].v * H, label: 'C2', dirX: -1, dirY: -1 },
+            { px: cp3.x, py: cp3.y, defX: DEFAULT_CORNERS[3].u * W, defY: DEFAULT_CORNERS[3].v * H, label: 'C3', dirX: 1, dirY: -1 },
+        ];
+
+        let maxShift = 0;
+        let sumShift = 0;
+        const bLen = 14;
+
+        ctx.lineWidth = 2;
+        for (let i = 0; i < 4; i++) {
+            const cp = ctrlPoints[i];
+            const px = cp.px, py = cp.py;
+            const defX = cp.defX, defY = cp.defY;
+            const shift = Math.hypot(px - defX, py - defY);
+            sumShift += shift;
+            if (shift > maxShift) maxShift = shift;
+
+            // If corner is shifted from default, draw ghost marker at default position and connector
+            if (shift > 2) {
+                ctx.save();
+                ctx.strokeStyle = hexToRgba(acc, 0.25);
+                ctx.setLineDash([2, 3]);
+                ctx.beginPath();
+                ctx.moveTo(defX, defY);
+                ctx.lineTo(px, py);
+                ctx.stroke();
+
+                ctx.strokeStyle = hexToRgba(acc, 0.35);
+                ctx.strokeRect(defX - 3, defY - 3, 6, 6);
+                ctx.restore();
+            }
+
+            // Draw corner bracket at active position
+            ctx.strokeStyle = shift > 2 ? acc : hexToRgba(acc, 0.7);
+            ctx.beginPath();
+            ctx.moveTo(px + cp.dirX * bLen, py);
+            ctx.lineTo(px, py);
+            ctx.lineTo(px, py + cp.dirY * bLen);
+            ctx.stroke();
+
+            // Corner small anchor dot
+            ctx.fillStyle = acc;
+            ctx.beginPath();
+            ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Small label next to bracket
+            ctx.font = '9px ui-monospace, "SF Mono", monospace';
+            ctx.fillStyle = hexToRgba(acc, 0.6);
+            const tx = px + cp.dirX * (bLen + 4);
+            const ty = py + (cp.dirY > 0 ? -4 : 12);
+            ctx.fillText(cp.label, tx - (cp.dirX < 0 ? 14 : 0), ty);
+        }
+
+        // 4. Center boresight reticle
+        const center = mapPoint(corners, 0.50, 0.50);
+        const cx = center.x * W, cy = center.y * H;
+        const scx = W / 2, scy = H / 2;
+        const bDist = Math.hypot(cx - scx, cy - scy);
+
+        if (bDist > 2) {
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255, 180, 50, 0.4)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(scx - 6, scy); ctx.lineTo(scx + 6, scy);
+            ctx.moveTo(scx, scy - 6); ctx.lineTo(scx, scy + 6);
+            ctx.stroke();
+
+            ctx.strokeStyle = 'rgba(255, 180, 50, 0.55)';
+            ctx.setLineDash([2, 3]);
+            ctx.beginPath();
+            ctx.moveTo(scx, scy);
+            ctx.lineTo(cx, cy);
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        ctx.strokeStyle = acc;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+        ctx.stroke();
+
+        const rTick1 = 14, rTick2 = 21;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - rTick2); ctx.lineTo(cx, cy - rTick1);
+        ctx.moveTo(cx, cy + rTick1); ctx.lineTo(cx, cy + rTick2);
+        ctx.moveTo(cx - rTick2, cy); ctx.lineTo(cx - rTick1, cy);
+        ctx.moveTo(cx + rTick1, cy); ctx.lineTo(cx + rTick2, cy);
+        ctx.stroke();
+
+        ctx.fillStyle = acc;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 5. Calibration status HUD badge (visible when not dragging)
+        if (!d || !d.moved) {
+            const isDef = maxShift < 1.5;
+            const topW = Math.hypot(cp1.x - cp0.x, cp1.y - cp0.y);
+            const botW = Math.hypot(cp2.x - cp3.x, cp2.y - cp3.y);
+            const defW = 0.5 * W;
+            const scale = defW > 0 ? ((topW + botW) / 2) / defW : 1.0;
+
+            const badgeY = 74;
+            const badgeH = 22;
+            const bOffX = Math.round(cx - scx), bOffY = Math.round(cy - scy);
+            const statusText = isDef
+                ? 'CAL: FACTORY DEFAULT (1.00x)'
+                : `CAL: WARP ACTIVE • ΔBORESIGHT: ${bOffX >= 0 ? '+' : ''}${bOffX}, ${bOffY >= 0 ? '+' : ''}${bOffY}px • SCALE: ${scale.toFixed(2)}x`;
+
+            ctx.font = '10px ui-monospace, "SF Mono", monospace';
+            const tm = ctx.measureText(statusText);
+            const badgeW = tm.width + 32;
+            const badgeX = (W - badgeW) / 2;
+
+            ctx.fillStyle = 'rgba(10, 14, 18, 0.85)';
+            ctx.strokeStyle = isDef ? hexToRgba(acc, 0.35) : 'rgba(255, 180, 50, 0.6)';
+            ctx.lineWidth = 1;
+
+            ctx.beginPath();
+            drawRRect(badgeX, badgeY, badgeW, badgeH, 11);
+            ctx.fill();
+            ctx.stroke();
+
+            // Status indicator dot
+            ctx.fillStyle = isDef ? '#50e3c2' : '#f5a623';
+            ctx.beginPath();
+            ctx.arc(badgeX + 12, badgeY + badgeH / 2, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Status label
+            ctx.fillStyle = isDef ? acc : '#ffffff';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(statusText, badgeX + 22, badgeY + badgeH / 2);
+            ctx.textBaseline = 'alphabetic';
+        }
+
+        // 6. Active drag feedback (when dragging)
+        if (d && d.moved) {
+            ctx.strokeStyle = acc;
+            ctx.fillStyle = acc;
+            ctx.lineWidth = 2;
+
+            ctx.beginPath();
+            ctx.moveTo(d.x0, d.y0);
+            ctx.lineTo(d.x, d.y);
+            ctx.stroke();
+
+            ctx.fillRect(d.x0 - 4, d.y0 - 4, 8, 8);
+
+            const angle = Math.atan2(d.y - d.y0, d.x - d.x0);
+            const arrLen = 12;
+            ctx.beginPath();
+            ctx.moveTo(d.x, d.y);
+            ctx.lineTo(d.x - arrLen * Math.cos(angle - Math.PI / 6),
+                       d.y - arrLen * Math.sin(angle - Math.PI / 6));
+            ctx.lineTo(d.x - arrLen * Math.cos(angle + Math.PI / 6),
+                       d.y - arrLen * Math.sin(angle + Math.PI / 6));
+            ctx.closePath();
+            ctx.fill();
+
+            const dragDx = Math.round(d.x - d.x0);
+            const dragDy = Math.round(d.y - d.y0);
+            const deltaStr = `ΔX: ${dragDx > 0 ? '+' : ''}${dragDx}px  ΔY: ${dragDy > 0 ? '+' : ''}${dragDy}px`;
+            ctx.font = '10px ui-monospace, "SF Mono", monospace';
+            const dtm = ctx.measureText(deltaStr);
+            const pillW = dtm.width + 16;
+            const pillH = 20;
+            const pillX = Math.max(10, Math.min(W - pillW - 10, d.x + 12));
+            const pillY = Math.max(10, Math.min(H - pillH - 10, d.y - 28));
+
+            ctx.fillStyle = 'rgba(10, 14, 18, 0.9)';
+            ctx.strokeStyle = acc;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            drawRRect(pillX, pillY, pillW, pillH, 4);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = acc;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(deltaStr, pillX + 8, pillY + pillH / 2);
+            ctx.textBaseline = 'alphabetic';
+        }
+
+        ctx.restore();
     }
 
-    _openFreq() {
+    _openFreq(tab) {
         this._closeColor();
         this._closeSet();
         $('freq-pop').classList.add('open');
         $('btn-freq').classList.add('on');
-        if (this._selectFreqTab) this._selectFreqTab(this._freqTab, false);
+        let targetTab = tab;
+        if (!targetTab) {
+            if (this._wifing()) targetTab = 'wifi';
+            else if (this._watching()) targetTab = 'ntsc';
+            else targetTab = this._freqTab || 'wifi';
+        }
+        if (this._selectFreqTab) this._selectFreqTab(targetTab, false);
         this._layoutHudPops();
         this._placeFft();
         this._setHint(false);
@@ -1004,13 +1332,28 @@ export class Ui {
         inner.addEventListener('pointerdown', (e) => {
             const el = e.target.closest('.tile');
             if (!el) return;
+            if (this._wifing()) {
+                const fc = (+el.dataset.f0 + +el.dataset.f1) / 2;
+                this._wifiMhz(fc);
+                this._syncWifiTileTuned(fc);
+                e.preventDefault();
+                return;
+            }
             start(e, el, el.dataset.bw === '20');
         });
         const fft = $('fft-wrap');
         if (fft) {
             fft.addEventListener('pointerdown', (e) => {
                 if (this._freqTab !== 'wifi') return;
-                start(e, tile20AtX(e.clientX), true);
+                const t = tile20AtX(e.clientX);
+                if (this._wifing() && t) {
+                    const fc = (+t.dataset.f0 + +t.dataset.f1) / 2;
+                    this._wifiMhz(fc);
+                    this._syncWifiTileTuned(fc);
+                    e.preventDefault();
+                    return;
+                }
+                start(e, t, true);
             });
             fft.addEventListener('pointermove', (e) => {
                 if (paint === null || !only20) return;
@@ -1136,6 +1479,12 @@ export class Ui {
         chart.addEventListener('pointerdown', (e) => {
             const ch = this._ntscChAt(e.clientX, e.clientY);
             if (!ch) return;
+            if (this._watching()) {
+                this._watchMhz(ch.fc, true);
+                this._syncNtscChTuned(ch.fc);
+                e.preventDefault();
+                return;
+            }
             const el = chart.querySelector(`.ntsc-ch[data-id="${ch.id}"]`);
             paint = !(el && el.classList.contains('on'));
             mark(ch);
@@ -1323,8 +1672,15 @@ export class Ui {
             this._fftHold = this._fftAvg.slice();
         this._updateFftShape(this._fftAvg);
         this._updateFftScale();
-        if ($('freq-pop').classList.contains('open') && this.s.fft)
-            this._drawFft();
+        if ($('freq-pop').classList.contains('open') && this.s.fft) {
+            if (!this._fftRafPending) {
+                this._fftRafPending = true;
+                requestAnimationFrame(() => {
+                    this._fftRafPending = false;
+                    this._drawFft();
+                });
+            }
+        }
     }
 
     _fftView() {
@@ -1733,6 +2089,7 @@ export class Ui {
             ctx.fillStyle = g;
         }
         const chan = this._chanRanges;
+        let lastCol = null;
         for (let i = i0; i < i1; i++) {
             const raw = src[i];
             if (raw <= 0) continue;
@@ -1746,7 +2103,10 @@ export class Ui {
             if (!inten) {
                 const col = this._fftBinCss(bf0, lut, chan);
                 if (!col) continue;
-                ctx.fillStyle = col;
+                if (col !== lastCol) {
+                    ctx.fillStyle = col;
+                    lastCol = col;
+                }
             }
             ctx.fillRect(x0, h * (1 - vh), Math.max(x1 - x0, 0.5), vh * h);
         }
@@ -2039,8 +2399,15 @@ export class Ui {
         } else {
             this.renderer.setFreqSpan(this.s.manualLo, this.s.manualHi);
         }
-        if ($('freq-pop').classList.contains('open') && this.s.fft)
-            this._drawFft();
+        if ($('freq-pop').classList.contains('open') && this.s.fft) {
+            if (!this._fftRafPending) {
+                this._fftRafPending = true;
+                requestAnimationFrame(() => {
+                    this._fftRafPending = false;
+                    this._drawFft();
+                });
+            }
+        }
     }
 
     _maxTargetWidth(freq) {
@@ -2343,6 +2710,21 @@ export class Ui {
         this.net.set({ lo_start: lo, lo_end: hi, bands: [[lo, hi]] });
     }
 
+    _positionHoldRow() {
+        const row = $('hold-row');
+        if (!row) return;
+        const ntsc = $('btn-ntsc-top') || $('hud-left');
+        const cam = $('btn-cam') || $('hud-right');
+        if (!ntsc || !cam) return;
+        const rectN = ntsc.getBoundingClientRect();
+        const rectC = cam.getBoundingClientRect();
+        if (rectN.width > 0 && rectC.width > 0) {
+            const mid = (rectN.right + rectC.left) / 2;
+            row.style.left = `${mid}px`;
+            row.style.transform = 'translateX(-50%)';
+        }
+    }
+
     _syncHoldUi() {
         const row = $('hold-row');
         const input = $('hold-mhz');
@@ -2357,6 +2739,7 @@ export class Ui {
         if (document.activeElement !== input) input.value = String(f);
         $('hold-dn').disabled = f <= this._holdLoMin();
         $('hold-up').disabled = f >= this._holdLoMax();
+        this._positionHoldRow();
         row.classList.add('show');
     }
 
@@ -2373,6 +2756,7 @@ export class Ui {
         }
         this._hold.freq = f;
         if (this._watching()) this._watchMhz(f, false);
+        else if (this._wifing()) this._wifiMhz(f);
         else this._pushHold();
         this._syncHoldUi();
     }
@@ -2407,6 +2791,8 @@ export class Ui {
         this._bumpHint();
         if (this._watching() || this._vidMhz != null)
             this._stopVideo();
+        if (this._wifing() || this._wifiMhzTuned != null)
+            this._stopWifi();
         if (!restore) return;
         const s = h.saved;
         this.s.manualLo = s.manualLo;
@@ -2447,13 +2833,13 @@ export class Ui {
             if (!hit || !this._holdOk(hit.freq)) return;
             const rgb = this.renderer.pointColor(hit.freq, hit.inten);
             const freq = hit.freq;
-            /* Match the ~500 ms OS long-press haptic. */
             const ms = 500;
             const commit = () => {
                 if (!arm || arm.release) return;
                 const f = arm.freq;
                 drop();
                 if (this.state && this.state.mode === 'video') this._watchMhz(f, true);
+                else if (this.state && this.state.mode === 'wifi') this._wifiMhz(f);
                 else this._beginHold(f);
             };
             arm = { x: e.clientX, y: e.clientY, freq, timer: 0 };
@@ -2472,7 +2858,8 @@ export class Ui {
         });
         gl.addEventListener('pointercancel', drop);
         gl.addEventListener('contextmenu', (e) => e.preventDefault());
-        $('hold-resume').onclick = () => this._endHold(true);
+        const resumeBtn = $('hold-resume');
+        if (resumeBtn) resumeBtn.onclick = () => this._endHold(true);
         $('hold-dn').onclick = (e) => {
             e.stopPropagation();
             if (!this._hold) return;
@@ -2502,11 +2889,22 @@ export class Ui {
         });
         input.addEventListener('change', commitMhz);
         input.addEventListener('blur', commitMhz);
-        $('hold-watch').onclick = (e) => {
-            e.stopPropagation();
-            if (!this._hold || !Number.isFinite(this._hold.freq)) return;
-            this._watchMhz(this._hold.freq, true);
-        };
+        const holdWatch = $('hold-watch');
+        if (holdWatch) {
+            holdWatch.onclick = (e) => {
+                e.stopPropagation();
+                if (!this._hold || !Number.isFinite(this._hold.freq)) return;
+                this._watchMhz(this._hold.freq, true);
+            };
+        }
+        const holdWifi = $('hold-wifi');
+        if (holdWifi) {
+            holdWifi.onclick = (e) => {
+                e.stopPropagation();
+                if (!this._hold || !Number.isFinite(this._hold.freq)) return;
+                this._wifiMhz(this._hold.freq);
+            };
+        }
     }
 
     _bindVideo() {
@@ -2514,7 +2912,7 @@ export class Ui {
         const bar = $('vid-bar');
         let drag = null;
         bar.addEventListener('pointerdown', (e) => {
-            if (e.target.closest('button')) return;
+            if (e.target.closest('button') || e.target.closest('#vid-title')) return;
             const r = win.getBoundingClientRect();
             drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
             try { bar.setPointerCapture(e.pointerId); } catch (_) {}
@@ -2535,6 +2933,13 @@ export class Ui {
             this._stopVideo();
             if (this._hold) this._pushHold();
         };
+        const vidTitle = $('vid-title');
+        if (vidTitle) {
+            vidTitle.onclick = (e) => {
+                e.stopPropagation();
+                this._openFreq('ntsc');
+            };
+        }
         const input = $('ntsc-mhz');
         input.addEventListener('input', () => this._syncNtscWatch());
         input.addEventListener('keydown', (e) => {
@@ -2566,6 +2971,11 @@ export class Ui {
         this._vidErrHold = '';
         const win = $('vid-win');
         if (win) win.classList.remove('show');
+        const ntscTop = $('btn-ntsc-top');
+        if (ntscTop) ntscTop.classList.remove('on');
+        const ntscHint = $('ntsc-tune-hint');
+        if (ntscHint) ntscHint.style.display = 'none';
+        for (const el of document.querySelectorAll('#ntsc-chart .ntsc-ch.tuned')) el.classList.remove('tuned');
         this._dropVidUrl();
         this.renderer.clearAim();
         this.net.send({ type: 'video_stop' });
@@ -2605,7 +3015,15 @@ export class Ui {
 
     _syncVideo(st) {
         const win = $('vid-win');
+        const ntscTop = $('btn-ntsc-top');
+        if (ntscTop) ntscTop.classList.toggle('on', st.mode === 'video');
+        const ntscHint = $('ntsc-tune-hint');
+        if (ntscHint) ntscHint.style.display = (st.mode === 'video') ? 'block' : 'none';
+
         if (st.mode === 'video') {
+            if (Number.isFinite(st.video_mhz)) {
+                this._syncNtscChTuned(st.video_mhz);
+            }
             if (this._vidClosed) return;
             if (st.video_mhz !== this._vidMhz) {
                 const isHop = this._vidMhz !== null && Math.abs(st.video_mhz - this._vidMhz) >= 5;
@@ -2647,6 +3065,9 @@ export class Ui {
             this._vidGot = false;
             this._vidMhz = null;
             this._dropVidUrl();
+        }
+        for (const el of document.querySelectorAll('#ntsc-chart .ntsc-ch.tuned')) {
+            el.classList.remove('tuned');
         }
         this.renderer.clearAim();
     }
@@ -2697,6 +3118,348 @@ export class Ui {
         img.src = url;
     }
 
+
+    _bindWifi() {
+        const win = $('wifi-win');
+        const bar = $('wifi-bar');
+        let drag = null;
+        if (bar && win) {
+            bar.addEventListener('pointerdown', (e) => {
+                if (e.target.closest('button') || e.target.closest('#wifi-ch-badge')) return;
+                const r = win.getBoundingClientRect();
+                drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+                try { bar.setPointerCapture(e.pointerId); } catch (_) {}
+            });
+            bar.addEventListener('pointermove', (e) => {
+                if (!drag) return;
+                const x = Math.max(0, Math.min(e.clientX - drag.dx, innerWidth - 80));
+                const y = Math.max(0, Math.min(e.clientY - drag.dy, innerHeight - 48));
+                win.style.left = x + 'px';
+                win.style.top = y + 'px';
+                win.style.bottom = 'auto';
+            });
+            const end = () => { drag = null; };
+            bar.addEventListener('pointerup', end);
+            bar.addEventListener('pointercancel', end);
+        }
+
+        const closeBtn = $('wifi-close');
+        if (closeBtn) {
+            closeBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._stopWifi();
+                if (this._hold) this._pushHold();
+            };
+        }
+
+        const clearBtn = $('wifi-clear');
+        if (clearBtn) {
+            clearBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._clearWifi();
+            };
+        }
+        const chBadge = $('wifi-ch-badge');
+        if (chBadge) {
+            chBadge.onclick = (e) => {
+                e.stopPropagation();
+                this._openFreq('wifi');
+            };
+        }
+
+
+
+
+
+        const tbody = $('wifi-packet-tbody');
+        if (tbody) {
+            tbody.addEventListener('click', (e) => {
+                const tr = e.target.closest('tr');
+                if (!tr) return;
+                const idx = parseInt(tr.dataset.idx, 10);
+                if (!Number.isNaN(idx)) {
+                    this._selectWifiPacket(idx);
+                }
+            });
+        }
+
+        this._wifiClosed = false;
+        this._wifiMhzTuned = null;
+        this._wifiPkts = [];
+        this._wifiPktCount = 0;
+        this._wifiLastSelectedIdx = -1;
+    }
+
+    _wifing() {
+        return !!(this.state && this.state.mode === 'wifi');
+    }
+
+    _snapWifi(mhz) {
+        const lockLo = (this.state && this.state.lock_lo > 0) ? this.state.lock_lo : 4480;
+        const lockHi = (this.state && this.state.lock_hi > 0) ? this.state.lock_hi : 6740;
+
+        if (!Number.isFinite(mhz)) return { mhz: 5180, ch: 36, band: '5 GHz' };
+        if (mhz >= 5945 && mhz <= 6745) {
+            let ch = Math.round((mhz - 5955) / 20) * 4 + 1;
+            ch = Math.max(1, Math.min(153, ch));
+            const snapMhz = 5955 + (ch - 1) * 5;
+            if (snapMhz >= lockLo && snapMhz <= lockHi) {
+                return { mhz: snapMhz, ch, band: '6 GHz' };
+            }
+        }
+        const allChs = [
+            { ch: 36, mhz: 5180 }, { ch: 40, mhz: 5200 }, { ch: 44, mhz: 5220 }, { ch: 48, mhz: 5240 },
+            { ch: 52, mhz: 5260 }, { ch: 56, mhz: 5280 }, { ch: 60, mhz: 5300 }, { ch: 64, mhz: 5320 },
+            { ch: 100, mhz: 5500 }, { ch: 104, mhz: 5520 }, { ch: 108, mhz: 5540 }, { ch: 112, mhz: 5560 },
+            { ch: 116, mhz: 5580 }, { ch: 120, mhz: 5600 }, { ch: 124, mhz: 5620 }, { ch: 128, mhz: 5640 },
+            { ch: 132, mhz: 5660 }, { ch: 136, mhz: 5680 }, { ch: 140, mhz: 5700 }, { ch: 144, mhz: 5720 },
+            { ch: 149, mhz: 5745 }, { ch: 153, mhz: 5765 }, { ch: 157, mhz: 5785 }, { ch: 161, mhz: 5805 },
+            { ch: 165, mhz: 5825 }, { ch: 169, mhz: 5845 }, { ch: 173, mhz: 5865 }, { ch: 177, mhz: 5885 }
+        ];
+        const CHS = allChs.filter(c => c.mhz >= lockLo && c.mhz <= lockHi);
+        const candidates = CHS.length > 0 ? CHS : allChs;
+        let best = candidates[0];
+        let minDiff = 1e9;
+        for (const c of candidates) {
+            const diff = Math.abs(c.mhz - mhz);
+            if (diff < minDiff) {
+                minDiff = diff;
+                best = c;
+            }
+        }
+        return { mhz: best.mhz, ch: best.ch, band: '5 GHz' };
+    }
+
+    _wifiMhz(mhz) {
+        if (!Number.isFinite(mhz)) return;
+        const s = this._snapWifi(mhz);
+        this._wifiClosed = false;
+        this.net.send({ type: 'wifi', mhz: s.mhz, freq_mhz: s.mhz });
+        const win = $('wifi-win');
+        if (win) win.classList.add('show');
+        this._updateWifiPills(s.mhz);
+        const badge = $('wifi-ch-badge');
+        if (badge) badge.textContent = `CH ${s.ch} · ${s.mhz} MHz`;
+        if (this._hold) {
+            const f = this._holdMhz(s.mhz);
+            if (f !== this._hold.freq) {
+                this._hold.freq = f;
+                this._syncHoldUi();
+            }
+        }
+    }
+
+    _stopWifi() {
+        this._wifiClosed = true;
+        this._wifiMhzTuned = null;
+        this._wifiChTuned = null;
+        const win = $('wifi-win');
+        if (win) win.classList.remove('show');
+        const wifiTop = $('btn-wifi-top');
+        if (wifiTop) wifiTop.classList.remove('on');
+        const wifiHint = $('wifi-tune-hint');
+        if (wifiHint) wifiHint.style.display = 'none';
+        for (const el of document.querySelectorAll('#wifi-tiers .tile.tuned')) el.classList.remove('tuned');
+        this.renderer.clearAim();
+        this.net.send({ type: 'wifi_stop' });
+    }
+
+    _syncWifi(st) {
+        const win = $('wifi-win');
+        const wifiTop = $('btn-wifi-top');
+        if (wifiTop) wifiTop.classList.toggle('on', st.mode === 'wifi');
+        const wifiHint = $('wifi-tune-hint');
+        if (wifiHint) wifiHint.style.display = (st.mode === 'wifi') ? 'block' : 'none';
+
+        if (st.mode === 'wifi') {
+            if (this._wifiClosed) return;
+            if (win) win.classList.add('show');
+            if (st.wifi_mhz) {
+                this._syncWifiTileTuned(st.wifi_mhz);
+                if (st.wifi_mhz !== this._wifiMhzTuned || (st.wifi_ch && st.wifi_ch !== this._wifiChTuned)) {
+                    this._wifiMhzTuned = st.wifi_mhz;
+                    this._wifiChTuned = st.wifi_ch;
+                    const s = this._snapWifi(st.wifi_mhz);
+                    const badge = $('wifi-ch-badge');
+                    if (badge) badge.textContent = `CH ${s.ch} · ${st.wifi_mhz.toFixed(0)} MHz`;
+                }
+            }
+            if (this._hold && Number.isFinite(st.wifi_mhz)) {
+                const f = this._holdMhz(st.wifi_mhz);
+                if (f !== this._hold.freq) {
+                    this._hold.freq = f;
+                    this._syncHoldUi();
+                }
+            }
+        } else {
+            if (!this._wifiClosed && win && win.classList.contains('show')) {
+                win.classList.remove('show');
+            }
+            for (const el of document.querySelectorAll('#wifi-tiers .tile.tuned')) {
+                el.classList.remove('tuned');
+            }
+        }
+    }
+
+    _updateWifiPills(mhz) {}
+
+
+
+
+    _clearWifi() {
+        this._wifiPkts = [];
+        this._wifiPktCount = 0;
+        this._wifiLastSelectedIdx = -1;
+        const countEl = $('wifi-kpi-count');
+        if (countEl) countEl.innerHTML = '<b>0</b> PKTS';
+        const snrEl = $('wifi-kpi-snr');
+        if (snrEl) snrEl.innerHTML = 'SNR: <b>--</b> dB';
+        const evmEl = $('wifi-kpi-evm');
+        if (evmEl) evmEl.innerHTML = 'EVM: <b>--</b> dB';
+        const tbody = $('wifi-packet-tbody');
+        if (tbody) tbody.innerHTML = '';
+        const detail = $('wifi-detail-content');
+        if (detail) detail.textContent = 'Select a packet from the table to inspect 802.11 MAC headers, Frame Control fields, and Management IEs.';
+    }
+
+
+
+    onWifiPacket(header, pkt) {
+        if (this._wifiClosed) return;
+        this._wifiPktCount++;
+
+        const au = header.loEnd, av = header.aimV;
+        if (Number.isFinite(au) && Number.isFinite(av) && au * au + av * av <= 1) {
+            this.renderer.setAim(au, av, header.loStart || 0);
+        } else {
+            this.renderer.clearAim();
+        }
+
+        const countEl = $('wifi-kpi-count');
+        if (countEl) countEl.innerHTML = `<b>${this._wifiPktCount}</b> PKTS`;
+        if (Number.isFinite(pkt.snr_db)) {
+            const snrEl = $('wifi-kpi-snr');
+            if (snrEl) snrEl.innerHTML = `SNR: <b>${pkt.snr_db.toFixed(1)}</b> dB`;
+        }
+        if (Number.isFinite(pkt.evm_db)) {
+            const evmEl = $('wifi-kpi-evm');
+            if (evmEl) evmEl.innerHTML = `EVM: <b>${pkt.evm_db.toFixed(1)}</b> dB`;
+        }
+
+        this._wifiPkts.push(pkt);
+        const idx = this._wifiPkts.length - 1;
+        if (this._wifiPkts.length > 500) {
+            this._wifiPkts.shift();
+        }
+
+        const tbody = $('wifi-packet-tbody');
+        if (tbody) {
+            const tr = document.createElement('tr');
+            tr.dataset.idx = String(idx);
+
+            const now = new Date();
+            const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+
+            let cleanSubtype = pkt.subtype || '';
+            if (pkt.pkt_type && cleanSubtype.toLowerCase().startsWith(pkt.pkt_type.toLowerCase())) {
+                cleanSubtype = cleanSubtype.substring(pkt.pkt_type.length).replace(/^[:\s\-]+/, '');
+            }
+            const typeStr = (pkt.pkt_type ? `${pkt.pkt_type}` : '') + (cleanSubtype ? `: ${cleanSubtype}` : '');
+            const ssidStr = pkt.ssid || (pkt.pkt_type === 'Mgmt' && pkt.subtype === 'Beacon' ? '<hidden>' : '');
+            const bssidStr = pkt.bssid || '';
+            const srcStr = pkt.sa || (pkt.is_ipv4 ? pkt.ip_src : '');
+            const dstStr = pkt.da || (pkt.is_ipv4 ? pkt.ip_dst : '');
+            const rateStr = pkt.rate || '';
+            const snrStr = Number.isFinite(pkt.snr_db) ? `${pkt.snr_db.toFixed(0)} dB` : '';
+            const lenStr = `${pkt.len || 0} B`;
+
+            const typeClass = pkt.subtype === 'Beacon' ? 'type-beacon'
+                            : (pkt.pkt_type === 'Data' ? 'type-data'
+                            : (pkt.pkt_type === 'Ctrl' ? 'type-ctrl' : 'type-probe'));
+
+            tr.innerHTML = `
+                <td>${this._wifiPktCount}</td>
+                <td>${timeStr}</td>
+                <td><span class="${typeClass}">${typeStr}</span></td>
+                <td title="${bssidStr}">${bssidStr}</td>
+                <td title="${srcStr}">${srcStr}</td>
+                <td title="${dstStr}">${dstStr}</td>
+                <td>${rateStr}</td>
+                <td>${snrStr}</td>
+                <td>${lenStr}</td>
+            `;
+
+            tbody.appendChild(tr);
+
+            while (tbody.children.length > 200) {
+                tbody.removeChild(tbody.firstChild);
+            }
+
+            const container = $('wifi-table-container');
+            if (container) {
+                const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 70;
+                if (atBottom || this._wifiPktCount <= 5) {
+                    container.scrollTop = container.scrollHeight;
+                }
+            }
+        }
+
+    }
+
+    _selectWifiPacket(idx) {
+        const tbody = $('wifi-packet-tbody');
+        if (tbody) {
+            tbody.querySelectorAll('tr').forEach(tr => {
+                tr.classList.toggle('selected', tr.dataset.idx === String(idx));
+            });
+        }
+        const pkt = this._wifiPkts[idx] || this._wifiPkts[this._wifiPkts.length - 1];
+        if (!pkt) return;
+        this._wifiLastSelectedIdx = idx;
+
+        const detail = $('wifi-detail-content');
+        if (!detail) return;
+
+        let html = '';
+
+        // 1. PHY Layer
+        html += `<div class="tree-node">&#9656; <b>PHY LAYER</b></div>`;
+        html += `<div class="tree-leaf">Modulation / Rate: <span>${pkt.rate || '--'} (${pkt.rate_val ? pkt.rate_val + ' Mbps' : '--'})</span> · Len: <span>${pkt.len || 0} bytes</span></div>`;
+        html += `<div class="tree-leaf">SNR: <span>${Number.isFinite(pkt.snr_db) ? pkt.snr_db.toFixed(1) + ' dB' : '--'}</span> · EVM: <span>${Number.isFinite(pkt.evm_db) ? pkt.evm_db.toFixed(1) + ' dB' : '--'}</span> · CFO: <span>${Number.isFinite(pkt.cfo_hz) ? (pkt.cfo_hz / 1000).toFixed(1) + ' kHz' : '--'}</span></div>`;
+
+        // 2. MAC Frame
+        html += `<div class="tree-node">&#9656; <b>IEEE 802.11 MAC Frame</b> (${pkt.pkt_type || ''}: ${pkt.subtype || ''})</div>`;
+        html += `<div class="tree-leaf">Frame Control: <span>${pkt.fc || '0x0000'}</span> · Seq: <span>${pkt.seq !== undefined ? pkt.seq : '--'}</span> (Frag: ${pkt.frag || 0})</div>`;
+        html += `<div class="tree-leaf">Flags: <span>ToDS=${pkt.to_ds ? 1 : 0} FromDS=${pkt.from_ds ? 1 : 0} Retry=${pkt.retry ? 1 : 0} Prot=${pkt.protected ? 1 : 0}</span></div>`;
+        html += `<div class="tree-leaf">Destination (DA): <span>${pkt.da || '--'}</span></div>`;
+        html += `<div class="tree-leaf">Source (SA): <span>${pkt.sa || '--'}</span></div>`;
+        html += `<div class="tree-leaf">BSSID: <span>${pkt.bssid || '--'}</span></div>`;
+
+        // 3. Management
+        if (pkt.ssid || pkt.channel || pkt.beacon_int_tu) {
+            html += `<div class="tree-node">&#9656; <b>Management Parameters</b></div>`;
+            if (pkt.ssid) html += `<div class="tree-leaf">SSID: <span>"${pkt.ssid}"</span></div>`;
+            if (pkt.channel) html += `<div class="tree-leaf">Channel IE: <span>${pkt.channel}</span></div>`;
+            if (pkt.beacon_int_tu) html += `<div class="tree-leaf">Beacon Interval: <span>${pkt.beacon_int_tu} TU (${(pkt.beacon_int_tu * 1.024).toFixed(1)} ms)</span></div>`;
+        }
+
+        // 4. LLC / Upper Layer
+        if (pkt.has_llc || pkt.is_ipv4) {
+            html += `<div class="tree-node">&#9656; <b>LLC / Network Decapsulation</b></div>`;
+            if (pkt.ethertype) html += `<div class="tree-leaf">EtherType: <span>${pkt.ethertype} (${pkt.ethertype_name || ''})</span></div>`;
+            if (pkt.is_ipv4) html += `<div class="tree-leaf">IPv4: <span>${pkt.ip_src} &rarr; ${pkt.ip_dst}</span> (Proto: ${pkt.ip_proto || 'IPv4'})</div>`;
+            if (pkt.port_src || pkt.port_dst) html += `<div class="tree-leaf">Ports: <span>${pkt.port_src} &rarr; ${pkt.port_dst}</span></div>`;
+        }
+
+        // 5. Summary
+        if (pkt.summary) {
+            html += `<div class="tree-node">&#9656; <b>Summary</b></div>`;
+            html += `<div class="tree-leaf"><span>${pkt.summary}</span></div>`;
+        }
+
+        detail.innerHTML = html;
+    }
+
     /* Ring at the press. Color and bin are fixed from the point under
      * the cursor when the press started, and the sweep always takes `ms`. */
     _chargeStart(x, y, rgb, ms, onDone) {
@@ -2739,15 +3502,37 @@ export class Ui {
     _bindPointer() {
         const gl = $('gl');
         let down = null, lastPos = null;
+        const activePointers = new Map();
+        let prevPinchDist = null;
 
         gl.addEventListener('pointerdown', (e) => {
+            activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (activePointers.size === 2) {
+                const pts = Array.from(activePointers.values());
+                prevPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+            } else {
+                prevPinchDist = null;
+            }
             down = true;
             lastPos = { x: e.clientX, y: e.clientY };
         });
 
         gl.addEventListener('pointermove', (e) => {
+            if (activePointers.has(e.pointerId)) {
+                activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            }
+            if (activePointers.size >= 2 && this.renderer.morph > 0.5 && this.renderer.sphereCam === 'inside') {
+                const pts = Array.from(activePointers.values());
+                const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+                if (prevPinchDist !== null && prevPinchDist > 0) {
+                    const diff = prevPinchDist - dist;
+                    this.renderer.insideZoom(diff * 0.15);
+                }
+                prevPinchDist = dist;
+                return;
+            }
             if (!down) return;
-            if (this.renderer.morph > 0.5 && this.renderer.sphereCam === 'inside' && lastPos) {
+            if (this.renderer.morph > 0.5 && this.renderer.sphereCam === 'inside' && lastPos && activePointers.size <= 1) {
                 const dy = (e.clientX - lastPos.x) / innerWidth * 2.2;
                 const dp = (e.clientY - lastPos.y) / innerHeight * 1.6;
                 this.renderer.insideLook(dy, dp);
@@ -2755,9 +3540,20 @@ export class Ui {
             lastPos = { x: e.clientX, y: e.clientY };
         });
 
-        gl.addEventListener('pointerup', () => {
-            down = null;
-        });
+        const pointerEnd = (e) => {
+            activePointers.delete(e.pointerId);
+            if (activePointers.size < 2) prevPinchDist = null;
+            if (activePointers.size === 0) down = null;
+        };
+        gl.addEventListener('pointerup', pointerEnd);
+        gl.addEventListener('pointercancel', pointerEnd);
+
+        gl.addEventListener('wheel', (e) => {
+            if (this.renderer.morph > 0.5 && this.renderer.sphereCam === 'inside') {
+                e.preventDefault();
+                this.renderer.insideZoom(e.deltaY * 0.04);
+            }
+        }, { passive: false });
     }
 
     _layoutHudPops() {
@@ -2777,6 +3573,7 @@ export class Ui {
 
     _resize() {
         this._layoutHudPops();
+        this._positionHoldRow();
         this._drawFft();
         this._drawCal(this._calDrag);
     }
@@ -2835,16 +3632,17 @@ export class Ui {
         if (lab) lab.textContent = this._lockLabel(st);
         this._syncSweepFields(st);
         const lockBtn = $('s-lock');
-        if (lockBtn) lockBtn.disabled = !!st.lock_busy || st.mode === 'video';
+        if (lockBtn) lockBtn.disabled = !!st.lock_busy || st.mode === 'video' || st.mode === 'wifi';
         const gainWrap = $('gain-wrap');
         if (gainWrap) {
-            gainWrap.classList.toggle('agc', st.mode === 'video');
-            gainWrap.title = st.mode === 'video'
+            gainWrap.classList.toggle('agc', st.mode === 'video' || st.mode === 'wifi');
+            gainWrap.title = (st.mode === 'video' || st.mode === 'wifi')
                 ? 'Decoder AGC is running. This slider returns with the sweep.'
                 : '';
         }
         this._syncVideo(st);
-        if (st.mode === 'video') {
+        this._syncWifi(st);
+        if (st.mode === 'video' || st.mode === 'wifi') {
             $('gain-label').textContent = 'AGC';
         } else if (!this._gainDraggingRef()) {
             // don't fight the user's finger; adopt backend gain otherwise
@@ -2872,7 +3670,7 @@ export class Ui {
         const el = $('status');
         el.classList.remove('warn', 'lost');
         if (kind === 'live') {
-            el.textContent = 'STREAM UP';
+            el.textContent = '';
         } else if (kind === 'connecting') {
             el.textContent = 'CONNECTING';
             el.classList.add('warn');
@@ -2886,17 +3684,20 @@ export class Ui {
         const st = this.state;
         if (st && st.mode === 'video') {
             $('fps').textContent =
-                `GPU:${gpuFps.toFixed(0)}  VID:${(this._vidFps || 0).toFixed(1)}`;
+                `FPS:${gpuFps.toFixed(0)}  VID:${(this._vidFps || 0).toFixed(1)}`;
+            return;
+        }
+        if (st && st.mode === 'wifi') {
+            $('fps').textContent =
+                `FPS:${gpuFps.toFixed(0)}  WIFI PKTS:${this._wifiPktCount}`;
             return;
         }
         let extra = '';
-        if (st && typeof st.adc_peak === 'number') {
-            extra = `  ADC:${st.adc_peak | 0}/${(st.adc_rms || 0).toFixed(1)}`;
-            if (typeof st.lna_db === 'number' && st.lna_db >= 0)
-                extra += `  LNA:${st.lna_db}  VGA:${st.vga_db}`;
+        if (st && typeof st.lna_db === 'number' && st.lna_db >= 0) {
+            extra = `  LNA:${st.lna_db}  VGA:${st.vga_db}`;
         }
         $('fps').textContent =
-            `GPU:${gpuFps.toFixed(0)}  NET:${netFps.toFixed(1)}  PTS:${pts}${extra}`;
+            `FPS:${gpuFps.toFixed(0)}  SWEEP/S:${netFps.toFixed(1)}  PTS:${pts}${extra}`;
     }
 }
 

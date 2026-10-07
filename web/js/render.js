@@ -734,7 +734,9 @@ export class VrfRenderer {
     /* Screen-space pick of a live point. Returns {freq, score} or null.
      * Same projection as the point shader, so a long-press lands on the
      * cluster the user is looking at rather than a hue sampled off the
-     * framebuffer. Mirrors are only tested when the primary draw misses. */
+     * framebuffer. Weight is score inside the pick radius (same ranking
+     * as before) and score*(rad/d)^2 outside, so empty sky still takes
+     * the nearest cluster. */
     pickFreq(clientX, clientY) {
         const n = this.used;
         if (!n) return null;
@@ -759,20 +761,19 @@ export class VrfRenderer {
         const draw = this.pointGeo.drawRange;
         const i0 = draw.start | 0;
         const i1 = Math.min(n, i0 + (draw.count | 0));
+        const maxAge = tau > 0 ? tau * 4.0 : 100;
 
         const project = (ui, vi, flipW, ox, oy) => {
-            const freq = aux[ui];
-            const inten = aux[ui + 1];
             const birth = aux[ui + 2];
-            if (!(freq > 1000)) return null;
+            if (birth < -1e8) return null;
             const age = Math.max(now - birth, 0);
-            let decay;
-            if (tau < 0) {
-                if (age >= u.uStampWindow.value) return null;
-                decay = 1;
-            } else {
-                decay = tau > 0 ? Math.exp(-age / tau) : 1;
-            }
+            if (tau > 0 && age > maxAge) return null;
+            if (tau < 0 && age >= u.uStampWindow.value) return null;
+
+            const freq = aux[ui];
+            if (!(freq > 1000)) return null;
+            const inten = aux[ui + 1];
+            let decay = tau > 0 ? Math.exp(-age / tau) : 1;
             const lvl = Math.pow(Math.min(Math.max(inten, 0), 1), gain);
             let alpha = lvl * 0.55 * decay;
             if (alpha < 0.004) return null;
@@ -827,32 +828,28 @@ export class VrfRenderer {
             const px = (ndx * 0.5 + 0.5) * rect.width + rect.left;
             const py = (1 - (ndy * 0.5 + 0.5)) * rect.height + rect.top;
             const rad = Math.max(22, u.uPointSize.value * (0.35 + 0.65 * lvl));
-            return { freq, inten, score: inten * decay, dx: clientX - px, dy: clientY - py, rad };
+            return { freq, inten, score: Math.max(inten * decay, 0.001), dx: clientX - px, dy: clientY - py, rad };
         };
 
-        const bestIn = (ox, oy, flipW) => {
-            let best = null;
+        let best = null, bestW = -1;
+        const consider = (ox, oy, flipW) => {
             for (let i = i0; i < i1; i++) {
                 const hit = project(i * 4, i * 2, flipW, ox, oy);
                 if (!hit) continue;
-                if (hit.dx * hit.dx + hit.dy * hit.dy > hit.rad * hit.rad) continue;
-                if (!best || hit.score > best.score) best = hit;
+                const d2 = hit.dx * hit.dx + hit.dy * hit.dy;
+                const touchRad = Math.max(48, hit.rad * 1.6);
+                if (d2 > touchRad * touchRad) continue;
+                const w = hit.score / (1 + d2 / (hit.rad * hit.rad));
+                if (w > bestW) { bestW = w; best = hit; }
             }
-            return best;
         };
 
-        let best = bestIn(0, 0, 1);
-        if (this.showBottom && morph > 0.02) {
-            const b = bestIn(0, 0, -1);
-            if (b && (!best || b.score > best.score)) best = b;
-        }
+        consider(0, 0, 1);
+        if (this.showBottom && morph > 0.02) consider(0, 0, -1);
         if (!best && this.showMirrors && morph > 0.02) {
             for (const [ox, oy] of this.mirrorOffs) {
-                const b = bestIn(ox, oy, 1);
-                if (b && (!best || b.score > best.score)) best = b;
-                if (!(this.showBottom)) continue;
-                const c = bestIn(ox, oy, -1);
-                if (c && (!best || c.score > best.score)) best = c;
+                consider(ox, oy, 1);
+                if (this.showBottom) consider(ox, oy, -1);
             }
         }
         return best ? { freq: best.freq, inten: best.inten, score: best.score } : null;
@@ -1027,7 +1024,18 @@ export class VrfRenderer {
             fromRadius: Math.max(sph.radius, 0.05),
             fromYaw: this.insideYaw,
             fromPitch: this.insidePitch,
+            fromFov: this.camera.fov,
         };
+    }
+
+    /* Zoom in/out for inside view by adjusting FOV (degrees delta). */
+    insideZoom(delta) {
+        if (this.sphereCam !== "inside") return;
+        const next = Math.max(15, Math.min(95, this.camera.fov + delta));
+        if (Math.abs(next - this.camera.fov) > 0.1) {
+            this.camera.fov = next;
+            this.camera.updateProjectionMatrix();
+        }
     }
 
     /* Manual look-around for inside view (radians deltas). */
@@ -1084,6 +1092,10 @@ export class VrfRenderer {
             const vr = this._viewReset;
             this.insideYaw = vr.fromYaw * (1 - e);
             this.insidePitch = vr.fromPitch * (1 - e);
+            if (vr.fromFov && vr.fromFov !== 60) {
+                this.camera.fov = vr.fromFov + (60 - vr.fromFov) * e;
+                this.camera.updateProjectionMatrix();
+            }
             if (this.sphereCam !== 'inside') {
                 const theta = vr.fromTheta * (1 - e);
                 const phi = vr.fromPhi + (Math.PI / 2 - vr.fromPhi) * e;
@@ -1096,6 +1108,10 @@ export class VrfRenderer {
             if (u >= 1) {
                 this.insideYaw = 0;
                 this.insidePitch = 0;
+                if (this.camera.fov !== 60) {
+                    this.camera.fov = 60;
+                    this.camera.updateProjectionMatrix();
+                }
                 this._viewReset = null;
                 if (this.sphereCam === 'orbit') this._frontOrbitCam();
             }

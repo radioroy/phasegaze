@@ -68,6 +68,7 @@ int  csi_dev_set_lo(csi_dev_t *d, double freq_mhz);
  * chip's automatic VCO search, which does not finish, so the camera
  * path tunes with set_lo and must not retune through Soapy. */
 int  csi_dev_video_front_end(csi_dev_t *d);
+int  csi_dev_wifi_front_end(csi_dev_t *d);
 
 /* Manual RX gain in dB. FPGA 0x6A is the total-gain word the fabric splits
  * into LNA+VGA+digital. Same 0..63 range as quadrf-jtag / the web UI. */

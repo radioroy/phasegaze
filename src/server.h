@@ -26,13 +26,11 @@ int  server_start(const server_cfg_t *cfg);
 void server_stop(void);
 
 /* Queue a binary frame for broadcast (copies data).
- * slot 0 points, slot 1 spectrum, slot 2 one JPEG.
- * An unsent point frame keeps its hits and appends the next sweep of the
- * same plan; the packet goes out on the next poll that finds a client
- * keeping up. Spectrum and video stay latest-wins. */
+ * slot 0 points, slot 1 spectrum, slot 2 one JPEG, slot 3 Wi-Fi JSON packet. */
 #define SERVER_SLOT_POINTS   0
 #define SERVER_SLOT_SPECTRUM 1
 #define SERVER_SLOT_VIDEO    2
+#define SERVER_SLOT_WIFI     3
 
 void server_publish(int slot, const void *data, size_t len);
 

@@ -17,6 +17,7 @@ add_executable(quadrf-phasegaze
     src/hop.c
     src/server.c
     src/video.c
+    src/wifi.c
     src/external/mongoose.c
 )
 
