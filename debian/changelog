@@ -1,3 +1,37 @@
+quadrf-phasegaze (0.1.1-1) unstable; urgency=medium
+
+  * wifi,web,csi: Add 802.11 decode path and packet inspector
+  * debian: Hand synths back to automatic VAS on stop
+  * web: Use 500 ms hold dwell on desktop and touch
+  * web: Enter fullscreen on first click or key
+  * web: Clarify HTTP camera notice wording
+  * web: Improve HUD contrast on camera and show RF gain value
+  * web: Park hold LO on the picked center and add 1 MHz tune
+  * web: Clarify dwell hints and align touch hold to OS haptic
+  * web: Fix video window frame decode deadlock and mode-switch flicker
+  * video,web: Publish autosteer aim on NTSC frames and overlay reticle
+  * video,web,csi: Add NTSC watch path and cluster hold-to-dwell
+  * tests: Add pg_rfdiag LO health capture and widen perf full span
+  * web: Board sweep limits, lock cal UI, and 6 GHz freq panel
+  * csi,phasegaze: Measure MAX2851 lock pin range and clamp hop sweep
+  * ui: Default camera mode, persist freq tab, rings off
+  * web,dsp: Tag spectrum with plan LO and settle FFT on range change
+  * dsp,web,csi: Fold warm vn into spectrum and per-LO FFT hop EQ
+  * tests: Add quadrf-2 rxresp captures analysis and comb sideband scoring
+  * web: Drop fixed-spur mask toggle and spur margin slider
+  * tests: Add rxcap receiver-response capture, per-stage bench and rxresp results
+  * web: Add CFAR threshold, RX background norm and spur margin controls with gate rate readout
+  * dsp: Add receiver background normalization before CFAR; expose CFAR threshold and spur margin
+  * dsp: Notch 40 MHz spur comb and its IQ image before CFAR
+  * web: Queue point upload ranges per packet instead of replacing them
+  * tests: Add perf probe, CSI capture and old-vs-new DSP bench
+  * web: Write point attributes directly and drop per-frame allocations
+  * dsp: Split per-hop pipeline into hop.c and cut worker CPU ~16%
+  * phasegaze: Span-sync LO tuner, parallel DSP, and camera AR UI
+  * server: Set mongoose log level to MG_LL_ERROR
+
+ -- Roy C. Gross <61633595+radioroy@users.noreply.github.com>  Tue, 06 Oct 2026 19:05:15 -0700
+
 quadrf-phasegaze (0.1.0-1) unstable; urgency=medium
 
   * Initial standalone release for QuadRF.
