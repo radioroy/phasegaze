@@ -1,3 +1,9 @@
+quadrf-phasegaze (0.1.2-1) unstable; urgency=medium
+
+  * web: Drop cal status badge and drag delta readout
+
+ -- Roy C. Gross <61633595+radioroy@users.noreply.github.com>  Thu, 08 Oct 2026 00:36:42 -0700
+
 quadrf-phasegaze (0.1.1-1) unstable; urgency=medium
 
   * wifi,web,csi: Add 802.11 decode path and packet inspector
