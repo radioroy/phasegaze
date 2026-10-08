@@ -604,8 +604,7 @@ export class Ui {
         cv.addEventListener('pointercancel', end);
     }
 
-    /* Calibration overlay visualization: shows warp grid, control handles,
-     * boresight alignment, calibration state badge, and active drag vectors. */
+    /* Calibration overlay: warp grid, control polygon, boresight, drag vectors. */
     _drawCal(d) {
         const cv = $('cal-layer');
         if (!cv) return;
@@ -633,11 +632,6 @@ export class Ui {
             const num = parseInt(c, 16);
             if (isNaN(num)) return `rgba(184, 196, 184, ${a})`;
             return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${a})`;
-        };
-
-        const drawRRect = (x, y, rw, rh, r) => {
-            if (ctx.roundRect) ctx.roundRect(x, y, rw, rh, r);
-            else ctx.rect(x, y, rw, rh);
         };
 
         ctx.save();
@@ -713,8 +707,6 @@ export class Ui {
             { px: cp3.x, py: cp3.y, defX: DEFAULT_CORNERS[3].u * W, defY: DEFAULT_CORNERS[3].v * H, label: 'C3', dirX: 1, dirY: -1 },
         ];
 
-        let maxShift = 0;
-        let sumShift = 0;
         const bLen = 14;
 
         ctx.lineWidth = 2;
@@ -723,8 +715,6 @@ export class Ui {
             const px = cp.px, py = cp.py;
             const defX = cp.defX, defY = cp.defY;
             const shift = Math.hypot(px - defX, py - defY);
-            sumShift += shift;
-            if (shift > maxShift) maxShift = shift;
 
             // If corner is shifted from default, draw ghost marker at default position and connector
             if (shift > 2) {
@@ -806,49 +796,8 @@ export class Ui {
         ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
         ctx.fill();
 
-        // 5. Calibration status HUD badge (visible when not dragging)
-        if (!d || !d.moved) {
-            const isDef = maxShift < 1.5;
-            const topW = Math.hypot(cp1.x - cp0.x, cp1.y - cp0.y);
-            const botW = Math.hypot(cp2.x - cp3.x, cp2.y - cp3.y);
-            const defW = 0.5 * W;
-            const scale = defW > 0 ? ((topW + botW) / 2) / defW : 1.0;
+        // Active drag vector
 
-            const badgeY = 74;
-            const badgeH = 22;
-            const bOffX = Math.round(cx - scx), bOffY = Math.round(cy - scy);
-            const statusText = isDef
-                ? 'CAL: FACTORY DEFAULT (1.00x)'
-                : `CAL: WARP ACTIVE • ΔBORESIGHT: ${bOffX >= 0 ? '+' : ''}${bOffX}, ${bOffY >= 0 ? '+' : ''}${bOffY}px • SCALE: ${scale.toFixed(2)}x`;
-
-            ctx.font = '10px ui-monospace, "SF Mono", monospace';
-            const tm = ctx.measureText(statusText);
-            const badgeW = tm.width + 32;
-            const badgeX = (W - badgeW) / 2;
-
-            ctx.fillStyle = 'rgba(10, 14, 18, 0.85)';
-            ctx.strokeStyle = isDef ? hexToRgba(acc, 0.35) : 'rgba(255, 180, 50, 0.6)';
-            ctx.lineWidth = 1;
-
-            ctx.beginPath();
-            drawRRect(badgeX, badgeY, badgeW, badgeH, 11);
-            ctx.fill();
-            ctx.stroke();
-
-            // Status indicator dot
-            ctx.fillStyle = isDef ? '#50e3c2' : '#f5a623';
-            ctx.beginPath();
-            ctx.arc(badgeX + 12, badgeY + badgeH / 2, 3.5, 0, Math.PI * 2);
-            ctx.fill();
-
-            // Status label
-            ctx.fillStyle = isDef ? acc : '#ffffff';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(statusText, badgeX + 22, badgeY + badgeH / 2);
-            ctx.textBaseline = 'alphabetic';
-        }
-
-        // 6. Active drag feedback (when dragging)
         if (d && d.moved) {
             ctx.strokeStyle = acc;
             ctx.fillStyle = acc;
@@ -871,29 +820,6 @@ export class Ui {
                        d.y - arrLen * Math.sin(angle + Math.PI / 6));
             ctx.closePath();
             ctx.fill();
-
-            const dragDx = Math.round(d.x - d.x0);
-            const dragDy = Math.round(d.y - d.y0);
-            const deltaStr = `ΔX: ${dragDx > 0 ? '+' : ''}${dragDx}px  ΔY: ${dragDy > 0 ? '+' : ''}${dragDy}px`;
-            ctx.font = '10px ui-monospace, "SF Mono", monospace';
-            const dtm = ctx.measureText(deltaStr);
-            const pillW = dtm.width + 16;
-            const pillH = 20;
-            const pillX = Math.max(10, Math.min(W - pillW - 10, d.x + 12));
-            const pillY = Math.max(10, Math.min(H - pillH - 10, d.y - 28));
-
-            ctx.fillStyle = 'rgba(10, 14, 18, 0.9)';
-            ctx.strokeStyle = acc;
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            drawRRect(pillX, pillY, pillW, pillH, 4);
-            ctx.fill();
-            ctx.stroke();
-
-            ctx.fillStyle = acc;
-            ctx.textBaseline = 'middle';
-            ctx.fillText(deltaStr, pillX + 8, pillY + pillH / 2);
-            ctx.textBaseline = 'alphabetic';
         }
 
         ctx.restore();
