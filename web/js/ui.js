@@ -2942,15 +2942,16 @@ export class Ui {
     _syncVideo(st) {
         const win = $('vid-win');
         const ntscTop = $('btn-ntsc-top');
-        if (ntscTop) ntscTop.classList.toggle('on', st.mode === 'video');
+        const videoOn = st.mode === 'video' && !this._vidClosed;
+        if (ntscTop) ntscTop.classList.toggle('on', videoOn);
         const ntscHint = $('ntsc-tune-hint');
-        if (ntscHint) ntscHint.style.display = (st.mode === 'video') ? 'block' : 'none';
+        if (ntscHint) ntscHint.style.display = videoOn ? 'block' : 'none';
 
         if (st.mode === 'video') {
+            if (this._vidClosed) return;
             if (Number.isFinite(st.video_mhz)) {
                 this._syncNtscChTuned(st.video_mhz);
             }
-            if (this._vidClosed) return;
             if (st.video_mhz !== this._vidMhz) {
                 const isHop = this._vidMhz !== null && Math.abs(st.video_mhz - this._vidMhz) >= 5;
                 this._vidMhz = st.video_mhz;

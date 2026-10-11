@@ -1125,12 +1125,17 @@ static void radio_to_sweep(void)
     workers_release();
 }
 
+static void wifi_restore_sweep(const char *err);
+
 static void video_restore_sweep(const char *err)
 {
     g_video_on = 0;
     g_video_tuned = 0;
     video_pipeline_stop();
-    if (!g_quit)
+    /* Wi-Fi still owns /dev/csi_stream0. Opening the sweep under it
+     * leaves 0x25 interleave off, and the next restore skips csi_dev_open
+     * because the fd is already held. */
+    if (!g_quit && !g_wifi_on)
         radio_to_sweep();
     video_set_status(0, 0, err ? err : "");
 }
@@ -1170,6 +1175,11 @@ static void video_enter(double mhz)
         video_set_status(0, mhz, "lock measure");
         return;
     }
+    /* Same handoff as wifi_enter: the other pipeline must be dead before
+     * this one maps the CSI ring. Otherwise the demod gets no frames
+     * (TUNING) and close flips the page back to Wi-Fi. */
+    if (g_wifi_on)
+        wifi_restore_sweep("");
     if (g_video_on && !video_pipeline_dead() && fabs(g_video_tuned - mhz) < 0.05)
         return;
 
