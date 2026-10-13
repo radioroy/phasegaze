@@ -1,8 +1,42 @@
+# Build directories
 build/
+build-*/
 dist/
+
+# Debian packaging
 *.deb
 *.buildinfo
 *.changes
 *.tar.*
 *.dsc
+
+# Object files and libraries
+*.o
+*.a
+*.so
+
+# CMake in-tree artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# IDEs and editors
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Caches and OS files
 .cache/
+.DS_Store
+Thumbs.db
+

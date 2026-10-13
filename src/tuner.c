@@ -473,8 +473,9 @@ int tuner_start(csi_dev_t *d, int cpu, const tuner_plan_t *plan)
     T.ring = d->ring_size;
     T.span_ns = SPAN_NS_NOM;
     T.st.span_us = SPAN_NS_NOM / 1e3;
-    T.w_adj = 80000.0;
-    T.w_band = 118000.0;
+    /* Seed the write duration EMA for RP1 RIO bit-banging (~8.8 us) */
+    T.w_adj = 10000.0;
+    T.w_band = 12000.0;
     g_span_bytes = d->span_bytes;
     T.next_plan = *plan;
     T.plan_pending = 1;
