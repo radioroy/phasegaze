@@ -151,6 +151,10 @@ function wfSpeedLabel(mult) {
 
 const $ = (id) => document.getElementById(id);
 
+// SSIDs and other decoded fields come straight off the air.
+const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 export class Ui {
     constructor({ net, renderer }) {
         this.net = net;
@@ -3816,6 +3820,8 @@ export class Ui {
         this._wifiPkts = [];
         this._wifiPktCount = 0;
         this._wifiLastSelectedIdx = -1;
+        this._wifiPending = [];
+        this._wifiRateHist = [];
         const countEl = $('wifi-kpi-count');
         if (countEl) countEl.innerHTML = '<b>0</b> PKTS';
         const snrEl = $('wifi-kpi-snr');
@@ -3833,6 +3839,8 @@ export class Ui {
     onWifiPacket(header, pkt) {
         if (this._wifiClosed) return;
         this._wifiPktCount++;
+        pkt._n = this._wifiPktCount;
+        pkt._t = new Date();
 
         const au = header.loEnd, av = header.aimV;
         if (Number.isFinite(au) && Number.isFinite(av) && au * au + av * av <= 1) {
@@ -3841,41 +3849,69 @@ export class Ui {
             this.renderer.clearAim();
         }
 
-        const countEl = $('wifi-kpi-count');
-        if (countEl) countEl.innerHTML = `<b>${this._wifiPktCount}</b> PKTS`;
-        if (Number.isFinite(pkt.snr_db)) {
-            const snrEl = $('wifi-kpi-snr');
-            if (snrEl) snrEl.innerHTML = `SNR: <b>${pkt.snr_db.toFixed(1)}</b> dB`;
-        }
-        if (Number.isFinite(pkt.evm_db)) {
-            const evmEl = $('wifi-kpi-evm');
-            if (evmEl) evmEl.innerHTML = `EVM: <b>${pkt.evm_db.toFixed(1)}</b> dB`;
-        }
-
         this._wifiPkts.push(pkt);
-        const idx = this._wifiPkts.length - 1;
         if (this._wifiPkts.length > 500) {
             this._wifiPkts.shift();
         }
 
-        const tbody = $('wifi-packet-tbody');
-        if (tbody) {
-            const tr = document.createElement('tr');
-            tr.dataset.idx = String(idx);
+        // The receiver can hand over several hundred frames a second; touch
+        // the DOM at most once per animation frame.
+        (this._wifiPending || (this._wifiPending = [])).push(pkt);
+        if (!this._wifiRaf) {
+            this._wifiRaf = requestAnimationFrame(() => this._flushWifiRows());
+        }
+    }
 
-            const now = new Date();
-            const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+    _flushWifiRows() {
+        this._wifiRaf = 0;
+        const batch = this._wifiPending || [];
+        this._wifiPending = [];
+        if (this._wifiClosed || !batch.length) return;
+
+        const now = performance.now();
+        const hist = this._wifiRateHist || (this._wifiRateHist = []);
+        hist.push([now, this._wifiPktCount]);
+        while (hist.length > 2 && now - hist[0][0] > 2000) hist.shift();
+        let rateStr = '';
+        if (hist.length > 1 && now - hist[0][0] > 250) {
+            const pps = (this._wifiPktCount - hist[0][1]) * 1000 / (now - hist[0][0]);
+            rateStr = ` &middot; <b>${pps.toFixed(0)}</b>/s`;
+        }
+        const countEl = $('wifi-kpi-count');
+        if (countEl) countEl.innerHTML = `<b>${this._wifiPktCount}</b> PKTS${rateStr}`;
+
+        const last = batch[batch.length - 1];
+        if (Number.isFinite(last.snr_db)) {
+            const snrEl = $('wifi-kpi-snr');
+            if (snrEl) snrEl.innerHTML = `SNR: <b>${last.snr_db.toFixed(1)}</b> dB`;
+        }
+        if (Number.isFinite(last.evm_db)) {
+            const evmEl = $('wifi-kpi-evm');
+            if (evmEl) evmEl.innerHTML = `EVM: <b>${last.evm_db.toFixed(1)}</b> dB`;
+        }
+
+        const tbody = $('wifi-packet-tbody');
+        if (!tbody) return;
+        const container = $('wifi-table-container');
+        const atBottom = !container ||
+            container.scrollHeight - container.scrollTop - container.clientHeight < 70;
+
+        const frag = document.createDocumentFragment();
+        for (const pkt of batch.slice(-200)) {
+            const tr = document.createElement('tr');
+            tr.dataset.idx = String(pkt._n);
+
+            const t = pkt._t;
+            const timeStr = t.toTimeString().split(' ')[0] + '.' + String(t.getMilliseconds()).padStart(3, '0');
 
             let cleanSubtype = pkt.subtype || '';
             if (pkt.pkt_type && cleanSubtype.toLowerCase().startsWith(pkt.pkt_type.toLowerCase())) {
                 cleanSubtype = cleanSubtype.substring(pkt.pkt_type.length).replace(/^[:\s\-]+/, '');
             }
             const typeStr = (pkt.pkt_type ? `${pkt.pkt_type}` : '') + (cleanSubtype ? `: ${cleanSubtype}` : '');
-            const ssidStr = pkt.ssid || (pkt.pkt_type === 'Mgmt' && pkt.subtype === 'Beacon' ? '<hidden>' : '');
-            const bssidStr = pkt.bssid || '';
-            const srcStr = pkt.sa || (pkt.is_ipv4 ? pkt.ip_src : '');
-            const dstStr = pkt.da || (pkt.is_ipv4 ? pkt.ip_dst : '');
-            const rateStr = pkt.rate || '';
+            const bssidStr = escHtml(pkt.bssid || '');
+            const srcStr = escHtml(pkt.sa || (pkt.is_ipv4 ? pkt.ip_src : ''));
+            const dstStr = escHtml(pkt.da || (pkt.is_ipv4 ? pkt.ip_dst : ''));
             const snrStr = Number.isFinite(pkt.snr_db) ? `${pkt.snr_db.toFixed(0)} dB` : '';
             const lenStr = `${pkt.len || 0} B`;
 
@@ -3884,32 +3920,28 @@ export class Ui {
                             : (pkt.pkt_type === 'Ctrl' ? 'type-ctrl' : 'type-probe'));
 
             tr.innerHTML = `
-                <td>${this._wifiPktCount}</td>
+                <td>${pkt._n}</td>
                 <td>${timeStr}</td>
-                <td><span class="${typeClass}">${typeStr}</span></td>
+                <td><span class="${typeClass}">${escHtml(typeStr)}</span></td>
                 <td title="${bssidStr}">${bssidStr}</td>
                 <td title="${srcStr}">${srcStr}</td>
                 <td title="${dstStr}">${dstStr}</td>
-                <td>${rateStr}</td>
+                <td>${escHtml(pkt.rate || '')}</td>
                 <td>${snrStr}</td>
                 <td>${lenStr}</td>
             `;
+            frag.appendChild(tr);
+        }
+        tbody.appendChild(frag);
 
-            tbody.appendChild(tr);
-
-            while (tbody.children.length > 200) {
-                tbody.removeChild(tbody.firstChild);
-            }
-
-            const container = $('wifi-table-container');
-            if (container) {
-                const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 70;
-                if (atBottom || this._wifiPktCount <= 5) {
-                    container.scrollTop = container.scrollHeight;
-                }
-            }
+        let extra = tbody.children.length - 200;
+        while (extra-- > 0) {
+            tbody.removeChild(tbody.firstChild);
         }
 
+        if (container && (atBottom || this._wifiPktCount <= 5)) {
+            container.scrollTop = container.scrollHeight;
+        }
     }
 
     _selectWifiPacket(idx) {
@@ -3919,7 +3951,9 @@ export class Ui {
                 tr.classList.toggle('selected', tr.dataset.idx === String(idx));
             });
         }
-        const pkt = this._wifiPkts[idx] || this._wifiPkts[this._wifiPkts.length - 1];
+        const pkts = this._wifiPkts;
+        const base = pkts.length ? pkts[0]._n : 0;
+        const pkt = pkts[idx - base] || pkts[pkts.length - 1];
         if (!pkt) return;
         this._wifiLastSelectedIdx = idx;
 
@@ -3944,7 +3978,7 @@ export class Ui {
         // 3. Management
         if (pkt.ssid || pkt.channel || pkt.beacon_int_tu) {
             html += `<div class="tree-node">&#9656; <b>Management Parameters</b></div>`;
-            if (pkt.ssid) html += `<div class="tree-leaf">SSID: <span>"${pkt.ssid}"</span></div>`;
+            if (pkt.ssid) html += `<div class="tree-leaf">SSID: <span>"${escHtml(pkt.ssid)}"</span></div>`;
             if (pkt.channel) html += `<div class="tree-leaf">Channel IE: <span>${pkt.channel}</span></div>`;
             if (pkt.beacon_int_tu) html += `<div class="tree-leaf">Beacon Interval: <span>${pkt.beacon_int_tu} TU (${(pkt.beacon_int_tu * 1.024).toFixed(1)} ms)</span></div>`;
         }
@@ -3960,7 +3994,7 @@ export class Ui {
         // 5. Summary
         if (pkt.summary) {
             html += `<div class="tree-node">&#9656; <b>Summary</b></div>`;
-            html += `<div class="tree-leaf"><span>${pkt.summary}</span></div>`;
+            html += `<div class="tree-leaf"><span>${escHtml(pkt.summary)}</span></div>`;
         }
 
         detail.innerHTML = html;
