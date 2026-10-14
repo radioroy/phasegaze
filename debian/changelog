@@ -1,3 +1,9 @@
+quadrf-phasegaze (0.1.5-1) unstable; urgency=medium
+
+  * dsp,web: Add cross-hop sweep normalization exponent slider
+
+ -- Roy C. Gross <61633595+radioroy@users.noreply.github.com>  Wed, 14 Oct 2026 02:28:55 -0700
+
 quadrf-phasegaze (0.1.4-1) unstable; urgency=medium
 
   * tuner: Reseed write duration EMA for RP1 bit-banging and update gitignore
