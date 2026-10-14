@@ -72,7 +72,12 @@ const FFT_EQ_DETAIL_CLIP = 0.40;
 const FFT_SHIFT_MIN = 0.20;
 const FFT_SHIFT_IQR = 0.30;
 const FFT_MISS_HOLD = 6;
-const LS_KEY = 'phasegaze.settings.v10';
+const WF_DEFAULT_ROWS = 56;
+const WF_MAX_ROWS = 2048;
+const WF_COMP_HZ = 25;
+const WF_GAP_U32 = 0x09ffffff;
+const WF_TARGET_U32 = 0x73ffffff;
+const LS_KEY = 'phasegaze.settings.v11';
 const ACCENT_DEFAULT = '#b8c4b8';
 /* Camera mode hides the HUD this long after the last tap. */
 const CAM_HIDE_MS = 8000;
@@ -84,7 +89,8 @@ const DEFAULTS = {
     mirrors: true, bottom: false, tiles: true, rings: false,
     scheme: 'spectrum', targetLut: 'iron', targetFreq: 5500, targetWidth: 40,
     freqPin: true, wifiColor: 'band', freqTab: 'wifi',
-    fft: true, fftSpeed: 'fast', fftAgc: true,
+    fft: true, fftWaterfall: true, fftSpeed: 'fast', fftAgc: true,
+    wfHeight: WF_DEFAULT_ROWS, wfHeightMax: false, wfGain: 1.0, wfSpeed: 1.0, wfComp: false,
     hwGain: 45,
     manualLo: HW_MIN, manualHi: HW_MAX,
     wifiSel: [], wifiView: '5', ntscSel: [],
@@ -129,6 +135,19 @@ function balLabel(v) { return v <= 0 ? 'OFF' : `${v.toFixed(0)} DB`; }
 function closLabel(v) { return (v <= 0 || v >= 180) ? 'OFF' : `${v.toFixed(0)}°`; }
 /* CFAR: bin over the local log-power mean. */
 function cfarLabel(v) { return `${v.toFixed(1)} DB`; }
+/* Waterfall speed slider (-20..20): 0 = 1.0x, -20 = 0.01x, +20 = 10.0x. */
+function wfSpeedFromSlider(v) {
+    if (v === 0) return 1.0;
+    const raw = v < 0 ? Math.pow(10, v / 10) : Math.pow(10, v / 20);
+    return raw < 0.1 ? Math.round(raw * 100) / 100 : Math.round(raw * 10) / 10;
+}
+function wfSpeedToSlider(mult) {
+    const m = Math.max(0.01, Math.min(10.0, mult || 1.0));
+    return Math.round(m < 1.0 ? 10 * Math.log10(m) : 20 * Math.log10(m));
+}
+function wfSpeedLabel(mult) {
+    return mult < 0.1 ? `${mult.toFixed(2)}X` : `${mult.toFixed(1)}X`;
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -149,8 +168,18 @@ export class Ui {
         this.s.accent = parseHex(this.s.accent) || ACCENT_DEFAULT;
         if (!TARGET_LUTS.includes(this.s.targetLut)) this.s.targetLut = 'iron';
         if (typeof this.s.fft !== 'boolean') this.s.fft = true;
+        if (typeof this.s.fftWaterfall !== 'boolean') this.s.fftWaterfall = true;
         if (!FFT_SPEEDS.includes(this.s.fftSpeed)) this.s.fftSpeed = 'fast';
         if (typeof this.s.fftAgc !== 'boolean') this.s.fftAgc = true;
+        if (!Number.isFinite(this.s.wfHeight)) this.s.wfHeight = DEFAULTS.wfHeight;
+        this.s.wfHeight = Math.max(32, Math.min(WF_MAX_ROWS, Math.round(this.s.wfHeight)));
+        if (typeof this.s.wfHeightMax !== 'boolean')
+            this.s.wfHeightMax = this.s.wfHeight >= 360;
+        if (!Number.isFinite(this.s.wfGain)) this.s.wfGain = DEFAULTS.wfGain;
+        this.s.wfGain = Math.max(0.2, Math.min(3.0, this.s.wfGain));
+        if (!Number.isFinite(this.s.wfSpeed)) this.s.wfSpeed = DEFAULTS.wfSpeed;
+        this.s.wfSpeed = Math.max(0.01, Math.min(10.0, this.s.wfSpeed));
+        if (typeof this.s.wfComp !== 'boolean') this.s.wfComp = false;
         if (typeof this.s.freqPin !== 'boolean') this.s.freqPin = true;
         if (typeof this.s.mirrors !== 'boolean') this.s.mirrors = true;
         if (typeof this.s.rings !== 'boolean') this.s.rings = false;
@@ -188,6 +217,28 @@ export class Ui {
         this._fftSrvNorm = false;
         this._fftT = 0;
         this._fftDt = 0.03;
+        this._wfRing = null;
+        this._wfScratch = null;
+        this._wfPrev = null;
+        this._wfRingN = 0;
+        this._wfHead = 0;
+        this._wfCount = 0;
+        this._wfDirty = 0;
+        this._wfTopDirty = false;
+        this._wfAcc = 0;
+        this._wfCtx = null;
+        this._wfImg = null;
+        this._wfU32 = null;
+        this._wfColB0 = null;
+        this._wfColB1 = null;
+        this._wfColRgb = null;
+        this._wfScale = null;
+        this._wfHi = null;
+        this._wfAlpha = null;
+        this._wfIntLut = null;
+        this._wfSig = '';
+        this._wfTargetX = -1;
+        this._wfNonWf = { range: 150, wifi: 236, ntsc: 308 };
         this.state = null;
         this._sweepEdit = false;
         this.boardLo = HW_MIN;
@@ -241,6 +292,12 @@ export class Ui {
         try {
             const cur = localStorage.getItem(LS_KEY);
             if (cur) return JSON.parse(cur) || {};
+            const v10 = localStorage.getItem('phasegaze.settings.v10');
+            if (v10) {
+                const prev = JSON.parse(v10) || {};
+                delete prev.fftWaterfall;
+                return widen(prev);
+            }
             const v9 = localStorage.getItem('phasegaze.settings.v9');
             if (v9) return widen(JSON.parse(v9) || {});
             const v8 = localStorage.getItem('phasegaze.settings.v8');
@@ -1057,9 +1114,41 @@ export class Ui {
         return false;
     }
 
+    _wfMaxHeight() {
+        const vv = window.visualViewport;
+        const vh = vv ? vv.height : innerHeight;
+        const avail = vh - 56;
+        const tab = this._freqTab || 'wifi';
+        const fp = $('freq-pop'), cv = $('wf-canvas');
+        if (fp && fp.classList.contains('open') && cv && cv.offsetParent !== null) {
+            const nonWf = (fp.scrollHeight + 2) - (cv.offsetHeight || 0);
+            if (nonWf > 40) this._wfNonWf[tab] = nonWf;
+        }
+        const overhead = this._wfNonWf[tab] || (tab === 'range' ? 150 : tab === 'ntsc' ? 308 : 236);
+        return Math.min(WF_MAX_ROWS, Math.max(64, Math.floor(avail - overhead)));
+    }
+
+    _effectiveWfHeight() {
+        const maxH = this._wfMaxHeight();
+        if (this.s.wfHeightMax) return maxH;
+        return Math.max(32, Math.min(maxH, Math.round(this.s.wfHeight || WF_DEFAULT_ROWS)));
+    }
+
+    _syncWfHeightUi() {
+        const el = $('s-wf-height'), lab = $('v-wf-height');
+        if (!el || !lab) return;
+        const maxH = this._wfMaxHeight();
+        el.max = String(maxH);
+        const h = this._effectiveWfHeight();
+        if (this.s.wfHeightMax) this.s.wfHeight = maxH;
+        el.value = String(h);
+        lab.textContent = `${h} PX`;
+    }
+
     _placeFft() {
         const block = $('fft-block');
         block.classList.toggle('show', !!this.s.fft);
+        block.classList.toggle('wf', !!(this.s.fft && this.s.fftWaterfall));
         $('btn-fft').classList.toggle('on', !!this.s.fft);
         $('fft-side').classList.toggle('show', !!this.s.fft);
         this._syncFftOpts();
@@ -1070,15 +1159,20 @@ export class Ui {
             $('freq-ntsc').insertBefore(block, $('ntsc-chart'));
         else
             $('freq-range').insertBefore(block, $('manual-wrap'));
+        const cvWf = $('wf-canvas');
+        if (cvWf) cvWf.style.height = `${this._effectiveWfHeight()}px`;
+        this._syncWfHeightUi();
         this._drawFft();
     }
 
     _syncFftOpts() {
-        const sp = $('btn-fft-speed'), ag = $('btn-fft-agc');
+        const sp = $('btn-fft-speed'), ag = $('btn-fft-agc'), wf = $('btn-fft-wf'), twf = $('t-wf');
         if (!sp || !ag) return;
         sp.textContent = FFT_SPEED_LAB[this.s.fftSpeed] || 'FAST';
         ag.textContent = this.s.fftAgc ? 'AGC' : 'HOLD';
         ag.classList.toggle('on', !!this.s.fftAgc);
+        if (wf) wf.classList.toggle('on', !!this.s.fftWaterfall);
+        if (twf) twf.classList.toggle('on', !!this.s.fftWaterfall);
     }
 
     _buildWifi() {
@@ -1174,6 +1268,21 @@ export class Ui {
             this._syncFftOpts();
             this._drawFft();
         };
+        const btnWf = $('btn-fft-wf');
+        if (btnWf) {
+            btnWf.onclick = (e) => {
+                e.stopPropagation();
+                this.s.fftWaterfall = !this.s.fftWaterfall;
+                if (this.s.fftWaterfall) {
+                    this._clearWaterfall();
+                    if (this._fftAvg && this._fftAvg.length)
+                        this._pushWaterfallRow(this._fftAvg);
+                }
+                this.save();
+                this._placeFft();
+                this._layoutHudPops();
+            };
+        }
         this._bindWifiPaint(inner);
         this._restoreWifiTiles();
         selectTab(this._freqTab, false);
@@ -1601,6 +1710,8 @@ export class Ui {
             this._fftHold = this._fftAvg.slice();
         this._updateFftShape(this._fftAvg);
         this._updateFftScale();
+        if (this.s.fft && this.s.fftWaterfall && (this.s.fftAgc || !this._fftHold))
+            this._pushWaterfallRow(f32);
         if ($('freq-pop').classList.contains('open') && this.s.fft) {
             if (!this._fftRafPending) {
                 this._fftRafPending = true;
@@ -2040,6 +2151,418 @@ export class Ui {
             ctx.fillRect(x0, h * (1 - vh), Math.max(x1 - x0, 0.5), vh * h);
         }
         if (scheme === 'target') this._drawTargetMark(ctx, w, h, wifi, view0, view1);
+        if (this.s.fftWaterfall) this._drawWaterfall();
+    }
+
+    _clearWaterfall() {
+        if (this._wfRing) this._wfRing.fill(0);
+        if (this._wfPrev) this._wfPrev.fill(0);
+        this._wfHead = 0;
+        this._wfCount = 0;
+        this._wfDirty = WF_MAX_ROWS;
+        this._wfTopDirty = false;
+        this._wfAcc = 0;
+        this._wfSig = '';
+        if (this._wfU32) this._wfU32.fill(0);
+    }
+
+    /* Quantize one equalized sweep into the 2260-bin circular history ring.
+     * Visited bins in `f32` use their instantaneous single-sweep power so every
+     * sweep row reflects that sweep's raw snapshot; temporarily missed hops
+     * fall back to `_fftAvg` within `FFT_MISS_HOLD`. When `wfComp` or sub-1x
+     * `wfSpeed` combines multiple sweeps into one row, bins are peak-held
+     * across those sweeps so transient bursts are never lost. When >1x speed
+     * advances multiple rows per sweep, intermediate rows are linearly
+     * interpolated in 8-bit fixed-point between `_wfPrev` and `scratch`. */
+    _pushWaterfallRow(f32) {
+        const avg = this._fftAvg;
+        if (!avg || !avg.length) return;
+        const n = avg.length;
+        if (!this._wfRing || this._wfRingN !== n) {
+            this._wfRing = new Uint8Array(WF_MAX_ROWS * n);
+            this._wfScratch = new Uint8Array(n);
+            this._wfPrev = new Uint8Array(n);
+            this._wfRingN = n;
+            this._wfHead = 0;
+            this._wfCount = 0;
+            this._wfDirty = WF_MAX_ROWS;
+            this._wfTopDirty = false;
+            this._wfAcc = 0;
+        }
+        const scratch = this._wfScratch;
+        const prev = this._wfPrev;
+        const corr = this._fftCorr;
+        const hasRaw = f32 && f32.length === n;
+        const lo = this._fftLo > 0 ? this._fftLo : 0;
+        const base = lo * (1 - FFT_LO_PAD);
+        const knee = FFT_EQ_QUIET_IQR;
+        const invSig = 1 / Math.max((this._fftScale - lo) * 1.15 - knee, 0.35);
+
+        for (let i = 0; i < n; i++) {
+            const a = avg[i];
+            if (a <= 1e-8) { scratch[i] = 0; continue; }
+            const raw = (hasRaw && f32[i] > 1e-8) ? f32[i] : a;
+            const v = corr ? raw - corr[i] : raw;
+            if (v <= base) {
+                scratch[i] = 0;
+                continue;
+            }
+            const d = v - lo;
+            if (d <= knee) {
+                const f = Math.max(0, (v - base) / Math.max(lo + knee - base, 1e-4));
+                scratch[i] = (12 + f * 24) | 0;
+            } else {
+                const u = (d - knee) * invSig;
+                if (u >= 1) {
+                    scratch[i] = 255;
+                } else {
+                    const s = Math.sqrt(u);
+                    scratch[i] = (36 + 219 * s * Math.sqrt(s)) | 0;
+                }
+            }
+        }
+
+        const ring = this._wfRing;
+        if (this._wfCount === 0) {
+            this._wfHead = 0;
+            this._wfCount = 1;
+            this._wfDirty = 1;
+            this._wfTopDirty = true;
+            this._wfAcc = 0;
+            ring.set(scratch, 0);
+            prev.set(scratch);
+            return;
+        }
+
+        const speed = this.s.wfSpeed || 1;
+        const step = this.s.wfComp
+            ? Math.min(16, (this._fftDt || 0.03) * WF_COMP_HZ * speed)
+            : speed;
+        this._wfAcc += step;
+
+        if (this._wfAcc >= 1 - 1e-6) {
+            const rows = Math.min(WF_MAX_ROWS, Math.floor(this._wfAcc + 1e-6));
+            this._wfAcc = Math.max(0, this._wfAcc - rows);
+            if (rows === 1) {
+                const head = (this._wfHead + 1) % WF_MAX_ROWS;
+                this._wfHead = head;
+                if (this._wfCount < WF_MAX_ROWS) this._wfCount++;
+                if (this._wfDirty < WF_MAX_ROWS) this._wfDirty++;
+                ring.set(scratch, head * n);
+            } else {
+                for (let r = 1; r <= rows; r++) {
+                    const head = (this._wfHead + 1) % WF_MAX_ROWS;
+                    this._wfHead = head;
+                    if (this._wfCount < WF_MAX_ROWS) this._wfCount++;
+                    if (this._wfDirty < WF_MAX_ROWS) this._wfDirty++;
+                    const dstOff = head * n;
+                    if (r === rows) {
+                        ring.set(scratch, dstOff);
+                    } else {
+                        const w = Math.round((r / rows) * 256);
+                        const invW = 256 - w;
+                        for (let i = 0; i < n; i++)
+                            ring[dstOff + i] = (prev[i] * invW + scratch[i] * w + 128) >> 8;
+                    }
+                }
+            }
+            prev.set(scratch);
+        } else {
+            const dstOff = this._wfHead * n;
+            for (let i = 0; i < n; i++) {
+                const q = scratch[i];
+                if (q > ring[dstOff + i]) {
+                    ring[dstOff + i] = q;
+                    prev[i] = q;
+                }
+            }
+            this._wfTopDirty = true;
+        }
+    }
+
+    _fftBinRgb(f, lut, chan, out, off) {
+        if (this.s.scheme === 'target') {
+            const d = Math.abs(f - this.s.targetFreq) / Math.max(this.s.targetWidth, 0.1);
+            if (d > 1) {
+                out[off] = 71; out[off + 1] = 76; out[off + 2] = 87;
+                return;
+            }
+            const [r, g, b] = lutRgb(lut, 1 - d);
+            out[off] = r; out[off + 1] = g; out[off + 2] = b;
+            return;
+        }
+        let t;
+        if (chan && chan.length) {
+            const hit = chan.find(c => f >= c.f0 && f < c.f1);
+            if (!hit) {
+                out[off] = 71; out[off + 1] = 76; out[off + 2] = 87;
+                return;
+            }
+            t = hit.t;
+        } else if (this._freqTab === 'wifi') {
+            if (this.s.wifiColor === 'full')
+                t = (f - HW_MIN) / (HW_MAX - HW_MIN);
+            else
+                t = (f - WIFI_F0) / Math.max(WIFI_F1 - WIFI_F0, 1);
+        } else if (this._freqTab === 'ntsc') {
+            if (this.s.wifiColor === 'full')
+                t = (f - HW_MIN) / (HW_MAX - HW_MIN);
+            else
+                t = (f - NTSC_F0) / Math.max(NTSC_F1 - NTSC_F0, 1);
+        } else if (this.s.freqPin) {
+            t = (f - HW_MIN) / (HW_MAX - HW_MIN);
+        } else {
+            t = (f - this.s.manualLo) / Math.max(this.s.manualHi - this.s.manualLo, 1);
+        }
+        const [r, g, b] = lutRgb(lut, Math.max(0, Math.min(1, t)));
+        out[off] = r; out[off + 1] = g; out[off + 2] = b;
+    }
+
+    _rebuildWfLuts(lut) {
+        if (!this._wfScale) {
+            this._wfScale = new Uint16Array(256);
+            this._wfHi = new Uint8Array(256);
+            this._wfAlpha = new Uint8Array(256);
+        }
+        const scale = this._wfScale, hi = this._wfHi, alpha = this._wfAlpha;
+        const g = this.s.wfGain || 1.0;
+        const fg = g <= 1 ? g : 1 + 0.45 * (g - 1);
+        const ceil = g < 1 ? (0.35 + 0.65 * g) : 1;
+        scale[0] = 0; hi[0] = 0; alpha[0] = 0;
+        for (let q = 1; q < 256; q++) {
+            if (q <= 36) {
+                const t = q / 36;
+                scale[q] = Math.min(256, Math.round((64 + 48 * t) * fg));
+                hi[q] = 0;
+                alpha[q] = Math.min(250, Math.round((55 + 55 * t) * fg));
+            } else {
+                const u0 = (q - 36) / 219;
+                const u = Math.min(1, u0 * g);
+                scale[q] = Math.min(256, Math.round((120 + 136 * Math.pow(u, 0.75)) * ceil));
+                hi[q] = u > 0.60 ? Math.round(((u - 0.60) / 0.40) * 76 * ceil) : 0;
+                alpha[q] = Math.min(250, Math.round((150 + 100 * Math.pow(u, 0.55)) * ceil));
+            }
+        }
+
+        const scheme = this.s.scheme;
+        const inten = (SCHEMES[scheme] || SCHEMES.spectrum).mode === 1;
+        if (inten) {
+            if (!this._wfIntLut) this._wfIntLut = new Uint32Array(256);
+            const ilut = this._wfIntLut;
+            ilut[0] = 0;
+            for (let q = 1; q < 256; q++) {
+                let u;
+                if (q <= 36) {
+                    u = (q / 255) * fg;
+                } else {
+                    u = (36 / 255) * fg + (219 / 255) * Math.min(1, ((q - 36) / 219) * g);
+                }
+                u = Math.max(0, Math.min(1, u));
+                const [cr, cg, cb] = lutRgb(lut, u);
+                const fade = (q < 32 ? (0.18 + 0.82 * (q / 32)) : 1) * ceil;
+                const r = Math.min(255, (cr * fade) | 0);
+                const gr = Math.min(255, (cg * fade) | 0);
+                const b = Math.min(255, (cb * fade) | 0);
+                const a = alpha[q];
+                ilut[q] = (a << 24) | (b << 16) | (gr << 8) | r;
+            }
+        }
+    }
+
+    _rebuildWfCols(w, view) {
+        const { view0, view1, specF0, bin, n } = view;
+        if (!this._wfColB0 || this._wfColB0.length !== w) {
+            this._wfColB0 = new Int16Array(w);
+            this._wfColB1 = new Int16Array(w);
+            this._wfColRgb = new Uint8Array(w * 3);
+        }
+        const b0 = this._wfColB0, b1 = this._wfColB1, rgb = this._wfColRgb;
+        const wifi = this._freqTab === 'wifi';
+        const lut = this._fftLut();
+        const chan = this._chanRanges;
+        const span = view1 - view0;
+        const invBin = 1 / Math.max(bin, 1e-6);
+
+        for (let x = 0; x < w; x++) {
+            const u0 = x / w, u1 = (x + 1) / w;
+            const f0 = wifi ? this._wifiXToF(u0) : view0 + u0 * span;
+            const f1 = wifi ? this._wifiXToF(u1) : view0 + u1 * span;
+            const fm = 0.5 * (f0 + f1);
+            if (wifi && this._wifiInHole(fm)) {
+                b0[x] = -1;
+                b1[x] = -1;
+                continue;
+            }
+            let i0 = Math.floor((f0 - specF0) * invBin);
+            let i1 = Math.floor((f1 - specF0) * invBin);
+            if (i1 < i0) i1 = i0;
+            if (i0 < 0) i0 = 0;
+            if (i1 >= n) i1 = n - 1;
+            if (i0 > i1) i0 = i1;
+            b0[x] = i0;
+            b1[x] = i1;
+            this._fftBinRgb(fm, lut, chan, rgb, x * 3);
+        }
+
+        this._rebuildWfLuts(lut);
+
+        this._wfTargetX = -1;
+        if (this.s.scheme === 'target') {
+            const tf = this.s.targetFreq;
+            let ok = true;
+            if (wifi) {
+                const [a, b] = this._wifiViewSpan();
+                if (tf < a || tf > b) ok = false;
+            }
+            if (ok) {
+                const tx = Math.round((wifi ? this._wifiToX(tf) : (tf - view0) / span) * w);
+                if (tx >= 0 && tx < w) this._wfTargetX = tx;
+            }
+        }
+    }
+
+    /* Render display row `r` (0 = newest) with a 3-tap [1, 2, 1]/4 vertical
+     * anti-aliasing filter across (r-1, r, r+1) in pre-LUT Uint8 space. */
+    _renderWfRow(r, w, inten) {
+        const ring = this._wfRing;
+        const n = this._wfRingN;
+        const head = this._wfHead;
+        const count = this._wfCount;
+        const midOff = ((head - r + WF_MAX_ROWS) % WF_MAX_ROWS) * n;
+        const aboveOff = (r > 0 ? (head - r + 1 + WF_MAX_ROWS) % WF_MAX_ROWS : head) * n;
+        const belowOff = ((r + 1 < count ? head - r - 1 : head - r) + WF_MAX_ROWS) % WF_MAX_ROWS * n;
+        const single = count <= 1;
+        const dstRowOff = r * w;
+        const b0 = this._wfColB0, b1 = this._wfColB1;
+        const u32 = this._wfU32;
+        if (inten) {
+            const ilut = this._wfIntLut;
+            for (let x = 0; x < w; x++) {
+                const i0 = b0[x];
+                if (i0 < 0) { u32[dstRowOff + x] = WF_GAP_U32; continue; }
+                const i1 = b1[x];
+                let qM = ring[midOff + i0];
+                for (let i = i0 + 1; i <= i1; i++) {
+                    const v = ring[midOff + i];
+                    if (v > qM) qM = v;
+                }
+                let q = qM;
+                if (!single) {
+                    let qA = ring[aboveOff + i0], qB = ring[belowOff + i0];
+                    for (let i = i0 + 1; i <= i1; i++) {
+                        const va = ring[aboveOff + i], vb = ring[belowOff + i];
+                        if (va > qA) qA = va;
+                        if (vb > qB) qB = vb;
+                    }
+                    q = (qA + (qM << 1) + qB + 2) >> 2;
+                }
+                u32[dstRowOff + x] = ilut[q];
+            }
+        } else {
+            const rgb = this._wfColRgb;
+            const scale = this._wfScale, hiLut = this._wfHi, alpha = this._wfAlpha;
+            for (let x = 0; x < w; x++) {
+                const i0 = b0[x];
+                if (i0 < 0) { u32[dstRowOff + x] = WF_GAP_U32; continue; }
+                const i1 = b1[x];
+                let qM = ring[midOff + i0];
+                for (let i = i0 + 1; i <= i1; i++) {
+                    const v = ring[midOff + i];
+                    if (v > qM) qM = v;
+                }
+                let q = qM;
+                if (!single) {
+                    let qA = ring[aboveOff + i0], qB = ring[belowOff + i0];
+                    for (let i = i0 + 1; i <= i1; i++) {
+                        const va = ring[aboveOff + i], vb = ring[belowOff + i];
+                        if (va > qA) qA = va;
+                        if (vb > qB) qB = vb;
+                    }
+                    q = (qA + (qM << 1) + qB + 2) >> 2;
+                }
+                if (q === 0) { u32[dstRowOff + x] = 0; continue; }
+                const c3 = x * 3;
+                const s = scale[q], hi = hiLut[q], a = alpha[q];
+                let cr = ((rgb[c3] * s) >> 8) + hi; if (cr > 255) cr = 255;
+                let cg = ((rgb[c3 + 1] * s) >> 8) + hi; if (cg > 255) cg = 255;
+                let cb = ((rgb[c3 + 2] * s) >> 8) + hi; if (cb > 255) cb = 255;
+                u32[dstRowOff + x] = (a << 24) | (cb << 16) | (cg << 8) | cr;
+            }
+        }
+        if (this._wfTargetX >= 0)
+            u32[dstRowOff + this._wfTargetX] = WF_TARGET_U32;
+    }
+
+    _drawWaterfall() {
+        const cv = $('wf-canvas');
+        if (!cv || !this.s.fft || !this.s.fftWaterfall) return;
+        const h = this._effectiveWfHeight();
+        if (cv.style.height !== `${h}px`) cv.style.height = `${h}px`;
+        const w = cv.clientWidth;
+        if (w < 2) return;
+        const view = this._fftView();
+        if (!view.n || !this._wfRing) return;
+
+        let resized = false;
+        if (cv.width !== w || cv.height !== h) {
+            cv.width = w;
+            cv.height = h;
+            this._wfCtx = cv.getContext('2d');
+            this._wfImg = this._wfCtx.createImageData(w, h);
+            this._wfU32 = new Uint32Array(this._wfImg.data.buffer);
+            resized = true;
+        }
+        const ctx = this._wfCtx || (this._wfCtx = cv.getContext('2d'));
+        const chanKey = this._chanRanges
+            ? this._chanRanges.map(c => `${c.f0}:${c.f1}`).join(',')
+            : '';
+        const sig = `${w}|${h}|${view.n}|${view.specF0}|${view.specF1}|${view.view0}|${view.view1}|` +
+            `${this._freqTab}|${this._wifiView}|${this.s.scheme}|${this.s.targetLut}|` +
+            `${this.s.targetFreq}|${this.s.targetWidth}|${this.s.freqPin}|${this.s.wifiColor}|` +
+            `${this.s.manualLo}|${this.s.manualHi}|${this.s.wfGain}|${chanKey}`;
+
+        let full = resized;
+        if (sig !== this._wfSig) {
+            this._wfSig = sig;
+            this._rebuildWfCols(w, view);
+            full = true;
+        }
+
+        const dirty = this._wfDirty;
+        if (!full && dirty === 0 && !this._wfTopDirty) return;
+
+        const inten = (SCHEMES[this.s.scheme] || SCHEMES.spectrum).mode === 1;
+        const u32 = this._wfU32;
+        const b0 = this._wfColB0;
+        const count = this._wfCount;
+
+        if (full || dirty >= h) {
+            for (let r = 0; r < h; r++) {
+                if (r < count) {
+                    this._renderWfRow(r, w, inten);
+                } else {
+                    const dstOff = r * w;
+                    for (let x = 0; x < w; x++)
+                        u32[dstOff + x] = b0[x] < 0 ? WF_GAP_U32 : 0;
+                    if (this._wfTargetX >= 0)
+                        u32[dstOff + this._wfTargetX] = WF_TARGET_U32;
+                }
+            }
+        } else if (dirty > 0) {
+            u32.copyWithin(dirty * w, 0, (h - dirty) * w);
+            /* Also re-render row `dirty` (the previous top row) now that its
+             * upper neighbor exists for the 3-tap vertical filter. */
+            const nRender = Math.min(h, count, dirty + 1);
+            for (let r = 0; r < nRender; r++)
+                this._renderWfRow(r, w, inten);
+        } else if (this._wfTopDirty && count > 0) {
+            const nRender = Math.min(h, count, 2);
+            for (let r = 0; r < nRender; r++)
+                this._renderWfRow(r, w, inten);
+        }
+        this._wfDirty = 0;
+        this._wfTopDirty = false;
+        ctx.putImageData(this._wfImg, 0, 0);
     }
 
     _fftLut() {
@@ -2524,6 +3047,47 @@ export class Ui {
         bindToggle('tiles', 'tiles', v => this.renderer.setTiles(v));
         bindToggle('rings', 'rings', v => this.renderer.setRings(v));
         bindToggle('bgn', 'bgNorm', () => this.net.set(this._gateMsg()));
+        bindToggle('wf', 'fftWaterfall', v => {
+            if (v) {
+                this._clearWaterfall();
+                if (this._fftAvg && this._fftAvg.length)
+                    this._pushWaterfallRow(this._fftAvg);
+            }
+            this._placeFft();
+            this._layoutHudPops();
+        });
+        const elWfHeight = $('s-wf-height');
+        if (elWfHeight) {
+            elWfHeight.oninput = () => {
+                const maxH = this._wfMaxHeight();
+                elWfHeight.max = String(maxH);
+                const v = Math.round(parseFloat(elWfHeight.value));
+                this.s.wfHeightMax = v >= maxH - 2;
+                this.s.wfHeight = this.s.wfHeightMax ? maxH : v;
+                $('v-wf-height').textContent = `${this.s.wfHeight} PX`;
+                const cv = $('wf-canvas');
+                if (cv) cv.style.height = `${this.s.wfHeight}px`;
+                if ($('freq-pop').classList.contains('open') && this.s.fft && this.s.fftWaterfall)
+                    this._drawWaterfall();
+            };
+            elWfHeight.onchange = () => this.save();
+        }
+        bindRange('wf-gain', 'wfGain', v => `${v.toFixed(1)}X`, () => {
+            if ($('freq-pop').classList.contains('open') && this.s.fft && this.s.fftWaterfall)
+                this._drawWaterfall();
+        });
+        const elWfSpeed = $('s-wf-speed');
+        if (elWfSpeed) {
+            elWfSpeed.oninput = () => {
+                this.s.wfSpeed = wfSpeedFromSlider(parseFloat(elWfSpeed.value));
+                $('v-wf-speed').textContent = wfSpeedLabel(this.s.wfSpeed);
+                this._wfAcc = 0;
+            };
+            elWfSpeed.onchange = () => this.save();
+        }
+        bindToggle('wf-comp', 'wfComp', () => {
+            this._wfAcc = 0;
+        });
 
         const accent = $('s-accent');
         accent.oninput = () => {
@@ -2540,7 +3104,12 @@ export class Ui {
             if ($('set-pop').classList.contains('open')) this.net.send({ type: 'get_state' });
         }, 1000);
 
-        $('s-clear').onclick = () => this.renderer.clearPoints();
+        $('s-clear').onclick = () => {
+            this.renderer.clearPoints();
+            this._clearWaterfall();
+            if ($('freq-pop').classList.contains('open') && this.s.fft && this.s.fftWaterfall)
+                this._drawWaterfall();
+        };
         $('s-defaults').onclick = () => this._restoreDefaults();
         $('s-lock').onclick = () => {
             if (this.state && this.state.lock_busy) return;
@@ -2578,6 +3147,7 @@ export class Ui {
         this.s = { ...DEFAULTS, wifiSel: [], ntscSel: [], corners: defaultCorners() };
         this.s.manualLo = this.boardLo;
         this.s.manualHi = this.boardHi;
+        this._clearWaterfall();
         this.save();
         this._applyAll();
         this._syncSchemeUi();
@@ -2599,10 +3169,14 @@ export class Ui {
         $('s-bal').value = this.s.balanceDb; $('v-bal').textContent = balLabel(this.s.balanceDb);
         $('s-clos').value = this.s.closureDeg; $('v-clos').textContent = closLabel(this.s.closureDeg);
         $('s-cfar').value = this.s.cfarDb; $('v-cfar').textContent = cfarLabel(this.s.cfarDb);
+        this._syncWfHeightUi();
+        $('s-wf-gain').value = this.s.wfGain; $('v-wf-gain').textContent = `${this.s.wfGain.toFixed(1)}X`;
+        $('s-wf-speed').value = wfSpeedToSlider(this.s.wfSpeed); $('v-wf-speed').textContent = wfSpeedLabel(this.s.wfSpeed);
         $('s-accent').value = this.s.accent;
         $('v-accent').textContent = this.s.accent.toUpperCase();
         const tmap = { pulse: 'pulse', flip: 'flip',
-                       bottom: 'bottom', tiles: 'tiles', rings: 'rings', bgn: 'bgNorm' };
+                       bottom: 'bottom', tiles: 'tiles', rings: 'rings', bgn: 'bgNorm',
+                       wf: 'fftWaterfall', 'wf-comp': 'wfComp' };
         for (const [id, key] of Object.entries(tmap))
             $(`t-${id}`).classList.toggle('on', !!this.s[key]);
         $('btn-mirror').classList.toggle('on', !!this.s.mirrors);
@@ -3494,11 +4068,13 @@ export class Ui {
         /* Mobile browser toolbars eat into 100vh, which used to clip the
          * bottom action row even when scrolled to the end. */
         const vv = window.visualViewport;
-        const h = Math.max(160, (vv ? vv.height : innerHeight) - 64) + 'px';
+        const vh = vv ? vv.height : innerHeight;
+        const h = Math.max(160, vh - 56) + 'px';
         for (const id of ['freq-pop', 'color-pop', 'set-pop']) {
             $(id).style.width = w;
             $(id).style.maxHeight = h;
         }
+        this._syncWfHeightUi();
         if (this._layoutManual) this._layoutManual();
         if (this.s.fft) requestAnimationFrame(() => this._drawFft());
     }

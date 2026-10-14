@@ -190,8 +190,8 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     padding: 8px 10px 16px; box-sizing: border-box;
     /* JS narrows this to visualViewport height; the dvh fallback keeps the
        last row clear of the mobile browser toolbars before that runs. */
-    max-height: calc(100vh - 64px);
-    max-height: calc(100dvh - 64px);
+    max-height: calc(100vh - 56px);
+    max-height: calc(100dvh - 56px);
     overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
     scrollbar-width: thin;
     scrollbar-color: rgba(8, 10, 8, 0.45) transparent; }
@@ -218,12 +218,14 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 
 #fft-block { display: none; margin: 0 0 6px; }
 #fft-block.show { display: block; }
-#fft-wrap { height: 48px; }
 #freq-range #fft-wrap { padding: 0 72px; }
 #freq-wifi #fft-wrap { padding: 0 72px 0 0; touch-action: none; cursor: pointer; }
 #freq-wifi #wifi-tiers { margin-right: 72px; }
 #freq-ntsc #fft-wrap { padding: 0 72px 0 22px; }
 #fft-canvas { display: block; width: 100%; height: 48px; }
+#wf-canvas { display: none; width: 100%; height: 56px; margin-top: 2px;
+    border-top: 1px solid var(--line); }
+#fft-block.wf #wf-canvas { display: block; }
 
 /* wifi tier graphic — one band view at a time, no horizontal scroll */
 #wifi-views { display: flex; gap: 6px; margin: 0 72px 6px 0; }
@@ -555,6 +557,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
                 <div id="fft-side">
                     <button class="tab" id="btn-fft-speed">FAST</button>
                     <button class="tab" id="btn-fft-agc">AGC</button>
+                    <button class="tab" id="btn-fft-wf" title="Waterfall display">WF</button>
                 </div>
             </div>
         </div>
@@ -564,6 +567,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
         <div id="fft-block">
             <div id="fft-wrap">
                 <canvas id="fft-canvas"></canvas>
+                <canvas id="wf-canvas"></canvas>
             </div>
         </div>
         <div id="manual-wrap">
@@ -635,6 +639,16 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     <div class="tgl" id="t-bgn"><span>RX BACKGROUND NORM</span><div class="sw2"></div></div>
     <div class="srow"><label>HITS <span id="v-rej"></span></label></div>
 
+    <div class="sect">WATERFALL</div>
+    <div class="tgl" id="t-wf"><span>WATERFALL</span><div class="sw2"></div></div>
+    <div class="srow"><label>HEIGHT <span id="v-wf-height"></span></label>
+        <input type="range" id="s-wf-height" min="32" max="1080" step="1"></div>
+    <div class="srow"><label>INTENSITY <span id="v-wf-gain"></span></label>
+        <input type="range" id="s-wf-gain" min="0.2" max="3" step="0.1"></div>
+    <div class="srow"><label>SPEED <span id="v-wf-speed"></span></label>
+        <input type="range" id="s-wf-speed" min="-20" max="20" step="1"></div>
+    <div class="tgl" id="t-wf-comp"><span>SPAN RATE COMP</span><div class="sw2"></div></div>
+
     <div class="sect" id="sect-geometry">GEOMETRY</div>
     <div class="tgl" id="t-flip"><span>FLIP L/R</span><div class="sw2"></div></div>
 
@@ -671,6 +685,6 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     </div>
 </div>
 
-<script type="module" src="./app.js?v=pg108"></script>
+<script type="module" src="./app.js?v=pg113"></script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 
 import { Net } from './js/net.js?v=pg89';
 import { VrfRenderer } from './js/render.js?v=pg91';
-import { Ui } from './js/ui.js?v=pg108';
+import { Ui } from './js/ui.js?v=pg113';
 
 const renderer = new VrfRenderer(document.getElementById('gl'));
 const net = new Net();
