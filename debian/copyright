@@ -7,6 +7,14 @@ Copyright: 2026 Roy C. Gross
            2026 Scale RF
 License: GPL-3.0-or-later
 
+Files: src/wifi.c
+Copyright: 2026 Roy C. Gross
+           2026 Scale RF
+           2013, 2016 Bastian Bloessl <bloessl@ccs-labs.org>
+Comment: 802.11a/g sync and equalizer derived from gr-ieee802-11,
+ https://github.com/bastibl/gr-ieee802-11
+License: GPL-3.0-or-later
+
 Files: src/external/mongoose.*
 Copyright: Cesanta Software Limited
 License: GPL-2.0-only

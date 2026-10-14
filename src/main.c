@@ -300,8 +300,10 @@ static int on_control(const char *msg, size_t len, void *user)
         }
         pthread_mutex_unlock(&g_set.mtx);
         /* JTAG from this thread would land between retunes at random. */
-        if (apply_gain >= 0)
+        if (apply_gain >= 0) {
             tuner_set_gain(apply_gain);
+            wifi_set_gain(apply_gain);
+        }
     } else if (strcmp(type, "video") == 0) {
         if (mg_json_get_num(json, "$.freq_mhz", &d) && d >= 1000.0 && d <= 8000.0) {
             int snap = 1;
@@ -1333,6 +1335,9 @@ static void wifi_enter(double mhz)
         wifi_restore_sweep("front end");
         return;
     }
+    pthread_mutex_lock(&g_set.mtx);
+    wifi_set_gain(g_set.gain);
+    pthread_mutex_unlock(&g_set.mtx);
     if (wifi_pipeline_start(snap_mhz) != 0) {
         char err[80];
         wifi_pipeline_error(err, sizeof err);
@@ -1360,25 +1365,64 @@ static void wifi_fail(void)
     wifi_restore_sweep(err[0] ? err : "no packets");
 }
 
+/* Headless decode-rate check: park on mhz at a fixed gain, run the Wi-Fi
+ * receiver for sec seconds, print one RESULT line. The service must be
+ * stopped (it holds the CSI node). */
+static int wifi_bench(double mhz, double sec, int gain)
+{
+    int ch = 0;
+    double snap = wifi_snap_mhz(mhz, &ch, NULL);
+    if (csi_dev_open(&g_dev, DEVICE_PATH) != 0)
+        return 1;
+    csi_dev_set_gain(&g_dev, gain);
+    int rc = csi_dev_set_lo(&g_dev, snap);
+    csi_dev_close(&g_dev);
+    if (rc != 0) {
+        fprintf(stderr, "bench: LO %.1f MHz failed\n", snap);
+        return 1;
+    }
+    wifi_set_gain(gain);
+    if (wifi_pipeline_start(snap) != 0)
+        return 1;
+    uint64_t t0 = now_ns();
+    while (!g_quit && (double)(now_ns() - t0) * 1e-9 < sec && !wifi_pipeline_dead())
+        usleep(50000);
+    uint64_t pk = wifi_packets_decoded(), by = wifi_bytes_decoded();
+    double dt = (double)(now_ns() - t0) * 1e-9;
+    wifi_pipeline_stop();
+    printf("RESULT freq=%.0fMHz ch=%d gain=%ddB duration=%.2fs frames=%llu rate=%.2fpkt/s bytes=%llu\n",
+           snap, ch, gain, dt, (unsigned long long)pk, (double)pk / dt, (unsigned long long)by);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int port = 8001;
     const char *web_root = "/usr/share/quadrf/phasegaze";
+    double bench_mhz = 0, bench_sec = 10;
+    int bench_gain = 45;
 
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--web") && i + 1 < argc) web_root = argv[++i];
-        else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            fprintf(stderr, "usage: %s [--port N] [--web DIR]\n", argv[0]);
+        else if (!strcmp(argv[i], "--bench-wifi") && i + 1 < argc) {
+            bench_mhz = atof(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') bench_sec = atof(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') bench_gain = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+            fprintf(stderr, "usage: %s [--port N] [--web DIR] [--bench-wifi MHZ [SEC [GAIN]]]\n", argv[0]);
             return 0;
         } else {
-            fprintf(stderr, "usage: %s [--port N] [--web DIR]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--port N] [--web DIR] [--bench-wifi MHZ [SEC [GAIN]]]\n", argv[0]);
             return 1;
         }
     }
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
+
+    if (bench_mhz > 0)
+        return wifi_bench(bench_mhz, bench_sec, bench_gain);
 
     if (csi_dev_open(&g_dev, DEVICE_PATH) != 0)
         return 1;

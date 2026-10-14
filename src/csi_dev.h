@@ -76,6 +76,7 @@ int  csi_dev_set_gain(csi_dev_t *d, int gain);
 int  csi_dev_get_gain(csi_dev_t *d);
 /* SPI-read MAX2851 Main1 (LNA+VGA). Invasive; call after user gain changes. */
 int  csi_dev_probe_analog_gain(csi_dev_t *d);
+int  csi_dev_read_aoa(csi_dev_t *d, uint16_t *r2a, uint16_t *r2b);
 
 /* Walk the LO down and up. *lo_mhz and *hi_mhz are the last frequencies
  * where the lock pin is high in both directions. The tuner must be stopped;

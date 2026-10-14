@@ -13,6 +13,7 @@
 
 #define SLOTS      4
 #define POINT_SLOT 0
+#define WIFI_SLOT  3
 #define SLOT_CAP   (1u << 20)   /* 1 MB per slot, far above worst case */
 #define STATE_CAP  4096
 /* 16384 points is 256 KiB. One hop is ~0.44 ms and top-K is 512 points, so
@@ -97,8 +98,23 @@ static void *server_thread(void *arg)
             for (int i = 0; i < SLOTS; ++i) {
                 slot_t *s = &S.slots[i];
                 if (!s->ready) continue;
-                if (backlog > s->len) continue;  /* client is behind, drop */
-                mg_ws_send(c, s->buf, s->len, WEBSOCKET_OP_BINARY);
+                if (i == WIFI_SLOT) {
+                    /* Records are a few hundred bytes; judge the client on
+                     * an absolute backlog so a burst is not dropped whole. */
+                    if (backlog > 262144) continue;
+                    size_t off = 0;
+                    while (off + sizeof(uint32_t) <= s->len) {
+                        uint32_t flen = 0;
+                        memcpy(&flen, s->buf + off, sizeof(uint32_t));
+                        off += sizeof(uint32_t);
+                        if (flen == 0 || off + flen > s->len) break;
+                        mg_ws_send(c, s->buf + off, flen, WEBSOCKET_OP_BINARY);
+                        off += flen;
+                    }
+                } else {
+                    if (backlog > s->len) continue;  /* client is behind, drop */
+                    mg_ws_send(c, s->buf, s->len, WEBSOCKET_OP_BINARY);
+                }
                 sent[i] = 1;
             }
         }
@@ -106,7 +122,10 @@ static void *server_thread(void *arg)
          * starts a fresh one. A client that is behind keeps the slot so
          * later sweeps append instead of replacing what it has not seen. */
         for (int i = 0; i < SLOTS; ++i)
-            if (nws == 0 || sent[i]) S.slots[i].ready = 0;
+            if (nws == 0 || sent[i]) {
+                S.slots[i].ready = 0;
+                if (i == WIFI_SLOT) S.slots[i].len = 0;
+            }
         int dirty = S.state_dirty;
         S.state_dirty = 0;
         pthread_mutex_unlock(&S.mtx);
@@ -221,10 +240,23 @@ static void slot_store_points(const void *data, size_t len)
 void server_publish(int slot, const void *data, size_t len)
 {
     if (slot < 0 || slot >= SLOTS || len > SLOT_CAP || !data) return;
+    if (!S.slots[slot].buf) return;   /* server not started (--bench-wifi) */
     pthread_mutex_lock(&S.mtx);
-    if (slot == POINT_SLOT)
+    if (slot == POINT_SLOT) {
         slot_store_points(data, len);
-    else {
+    } else if (slot == WIFI_SLOT) {
+        /* Pack length-prefixed PG_FRAME_WIFI records so multi-packet bursts
+         * arriving inside a 5 ms poll tick are queued rather than overwritten. */
+        slot_t *s = &S.slots[WIFI_SLOT];
+        if (!s->ready) s->len = 0;
+        uint32_t flen = (uint32_t)len;
+        if (s->len + sizeof(uint32_t) + len <= SLOT_CAP) {
+            memcpy(s->buf + s->len, &flen, sizeof(uint32_t));
+            memcpy(s->buf + s->len + sizeof(uint32_t), data, len);
+            s->len += sizeof(uint32_t) + len;
+            s->ready = 1;
+        }
+    } else {
         memcpy(S.slots[slot].buf, data, len);
         S.slots[slot].len = len;
         S.slots[slot].ready = 1;

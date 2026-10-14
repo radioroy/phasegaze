@@ -961,7 +961,10 @@ int csi_dev_wifi_front_end(csi_dev_t *d)
     uint16_t v2e = 0;
     if (jtag_read(d, 0x2E, &v2e) != 0)
         v2e = 0;
-    /* 0x2E bit0 autosteer off, bit1 8.8 MHz test tone off */
+    /* 0x23=0x0001 releases the RX mux and keeps MAX2850 TX disabled.
+     * 0x2E bit0 enables FPGA phase accumulation/autosteer across RX0..3;
+     * bit1 disables the 8.8 MHz internal BIST tone. */
+    (void)jtag_write(d, 0x23, 0x0001);
     v2e = (uint16_t)((v2e | 0x0001u) & ~0x0002u);
     if (jtag_write(d, 0x2E, v2e) != 0)
         return -1;
@@ -969,11 +972,11 @@ int csi_dev_wifi_front_end(csi_dev_t *d)
         return -1;
     if (jtag_write(d, 0x27, 12) != 0)     /* k=12 -> 240/12 = 20 MHz digital BW */
         return -1;
-    /* Bit 7 of 0x6A is the FPGA AGC. 0x6B is the amplitude target,
-     * 180 * 10^(-14/20) = 36. */
-    if (jtag_write(d, 0x6A, 0x0080) != 0)
-        return -1;
-    if (jtag_write(d, 0x6B, 36) != 0)
+    /* Keep manual gain in 0x6A (bit 7 = 0). On bursty CSMA/CA traffic the
+     * FPGA envelope AGC slews to maximum gain between frames and steps
+     * LNA/VGA mid-packet after L-LTF, invalidating the 1-tap equalizer H[k]. */
+    int gain = (d->last_gain >= 0 && d->last_gain <= 63) ? d->last_gain : 55;
+    if (jtag_write(d, 0x6A, (uint16_t)gain) != 0)
         return -1;
     return 0;
 }
@@ -1008,5 +1011,13 @@ int csi_dev_probe_analog_gain(csi_dev_t *d)
         return -1;
     }
     decode_main1(r1, &d->analog_lna_db, &d->analog_vga_db);
+    return 0;
+}
+
+int csi_dev_read_aoa(csi_dev_t *d, uint16_t *r2a, uint16_t *r2b)
+{
+    if (!d || d->fd < 0) return -1;
+    if (jtag_read(d, 0x2A, r2a) != 0) return -1;
+    if (jtag_read(d, 0x2B, r2b) != 0) return -1;
     return 0;
 }
