@@ -1,3 +1,10 @@
+quadrf-phasegaze (0.1.6-1) unstable; urgency=medium
+
+  * web: Add anti-aliased waterfall display with full-screen height range
+  * csi,dsp: Cache rail VCO sub-bands and unify sweep normalization scale
+
+ -- Roy C. Gross <61633595+radioroy@users.noreply.github.com>  Wed, 14 Oct 2026 03:58:45 -0700
+
 quadrf-phasegaze (0.1.5-1) unstable; urgency=medium
 
   * dsp,web: Add cross-hop sweep normalization exponent slider
