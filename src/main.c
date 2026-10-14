@@ -68,6 +68,7 @@
 #define CFAR_DB_DEFAULT      7.0f
 #define DB_TO_LN             0.23025851f
 #define SPUR_MARGIN_DEFAULT  3.0f
+#define SWEEP_NORM_DEFAULT   0.1f
 
 
 typedef struct {
@@ -85,6 +86,7 @@ typedef struct {
     int      bg_norm;       /* receiver background normalization on/off */
     float    cfar_db;       /* CFAR threshold over the local log mean */
     float    spur_margin;   /* spur mask trip, x busiest-LO visits */
+    float    sweep_norm;    /* 0 = per-hop vmax, 1 = full-sweep vmax */
     hop_gates_t gates;      /* derived from the two above */
 } settings_t;
 
@@ -103,10 +105,12 @@ static settings_t g_set = {
     .bg_norm = 1,
     .cfar_db = CFAR_DB_DEFAULT,
     .spur_margin = SPUR_MARGIN_DEFAULT,
+    .sweep_norm = SWEEP_NORM_DEFAULT,
     .gates = { .closure_max = CLOSURE_MAX_DEFAULT,
                .balance_max = BALANCE_LIN_DEFAULT,
                .cfar_thresh = CFAR_DB_DEFAULT * DB_TO_LN,
-               .spur_margin = SPUR_MARGIN_DEFAULT },
+               .spur_margin = SPUR_MARGIN_DEFAULT,
+               .sweep_norm  = SWEEP_NORM_DEFAULT },
 };
 
 static struct {
@@ -232,6 +236,12 @@ static int on_control(const char *msg, size_t len, void *user)
             float m = (float)fmax(1.0, fmin(10.0, d));
             g_set.spur_margin = m;
             g_set.gates.spur_margin = m;
+            changed = 1;
+        }
+        if (mg_json_get_num(json, "$.sweep_norm", &d)) {
+            float n = (float)fmax(0.0, fmin(2.0, d));
+            g_set.sweep_norm = n;
+            g_set.gates.sweep_norm = n;
             changed = 1;
         }
         int sweep_changed = 0;
@@ -403,7 +413,7 @@ static void state_json(char *buf, size_t cap, void *user)
         "\"mode\":\"%s\",\"video_mhz\":%.1f,\"video_err\":\"%s\",\"wifi_mhz\":%.1f,\"wifi_ch\":%d,\"wifi_err\":\"%s\","
         "\"gain\":%d,\"output_fraction\":%.3f,"
         "\"closure_max\":%.3f,\"balance_db\":%.1f,\"spur_mask\":%d,"
-        "\"bg_norm\":%d,\"cfar_db\":%.2f,\"spur_margin\":%.2f,"
+        "\"bg_norm\":%d,\"cfar_db\":%.2f,\"spur_margin\":%.2f,\"sweep_norm\":%.2f,"
         "\"gates\":{\"hits\":%llu,\"rej_balance\":%llu,\"rej_closure\":%llu,"
         "\"rej_spur\":%llu},"
         "\"fps\":%.2f,\"points\":%u,\"adc_peak\":%d,\"adc_rms\":%.2f,"
@@ -420,6 +430,7 @@ static void state_json(char *buf, size_t cap, void *user)
         g_set.gain, g_set.output_fraction,
         (double)g_set.closure_max, (double)g_set.balance_db, g_set.spur_mask,
         g_set.bg_norm, (double)g_set.cfar_db, (double)g_set.spur_margin,
+        (double)g_set.sweep_norm,
         (unsigned long long)__atomic_load_n(&g_gstats.hits, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&g_gstats.rej_balance, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&g_gstats.rej_closure, __ATOMIC_RELAXED),

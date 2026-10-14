@@ -78,7 +78,7 @@ const ACCENT_DEFAULT = '#b8c4b8';
 const CAM_HIDE_MS = 8000;
 
 const DEFAULTS = {
-    size: 15, gain: 4.0, decay: 1, density: 100,
+    size: 15, gain: 4.0, sweepNorm: 0.1, decay: 1, density: 100,
     balanceDb: 10, closureDeg: 0, bgNorm: true, cfarDb: 7,
     pulse: false, flip: false,
     mirrors: true, bottom: false, tiles: true, rings: false,
@@ -139,6 +139,8 @@ export class Ui {
 
         this.s = { ...DEFAULTS, ...this._load() };
         this.s.hwGain = Math.max(0, Math.min(RF_GAIN_MAX, this.s.hwGain | 0));
+        if (!Number.isFinite(this.s.sweepNorm)) this.s.sweepNorm = DEFAULTS.sweepNorm;
+        this.s.sweepNorm = Math.max(0, Math.min(2, this.s.sweepNorm));
         if (!Number.isFinite(this.s.balanceDb)) this.s.balanceDb = DEFAULTS.balanceDb;
         if (!Number.isFinite(this.s.closureDeg)) this.s.closureDeg = DEFAULTS.closureDeg;
         if (typeof this.s.bgNorm !== 'boolean') this.s.bgNorm = true;
@@ -329,7 +331,8 @@ export class Ui {
     _gateMsg() {
         const deg = this.s.closureDeg >= 180 ? 0 : this.s.closureDeg;
         return { balance_db: this.s.balanceDb, closure_max: deg * Math.PI / 180,
-            bg_norm: this.s.bgNorm ? 1 : 0, cfar_db: this.s.cfarDb };
+            bg_norm: this.s.bgNorm ? 1 : 0, cfar_db: this.s.cfarDb,
+            sweep_norm: this.s.sweepNorm };
     }
 
     /* Backend re-sync (on connect). */
@@ -2493,6 +2496,7 @@ export class Ui {
         };
         bindRange('size', 'size', v => v.toFixed(0), v => this.renderer.setPointSize(v));
         bindRange('gain', 'gain', v => v.toFixed(1), v => this.renderer.setPointGain(v));
+        bindRange('norm', 'sweepNorm', v => v.toFixed(1), v => this.net.set({ sweep_norm: v }));
         bindRange('decay', 'decay', decayLabel, v => this.renderer.setDecayTau(decayTau(v)));
         bindRange('dens', 'density', v => `${v.toFixed(0)}%`, () => {});
         $('s-dens').onchange = () => {
@@ -2589,6 +2593,7 @@ export class Ui {
     _syncSettingUi() {
         $('s-size').value = this.s.size; $('v-size').textContent = this.s.size.toFixed(0);
         $('s-gain').value = this.s.gain; $('v-gain').textContent = this.s.gain.toFixed(1);
+        $('s-norm').value = this.s.sweepNorm; $('v-norm').textContent = this.s.sweepNorm.toFixed(1);
         $('s-decay').value = this.s.decay; $('v-decay').textContent = decayLabel(this.s.decay);
         $('s-dens').value = this.s.density; $('v-dens').textContent = `${this.s.density.toFixed(0)}%`;
         $('s-bal').value = this.s.balanceDb; $('v-bal').textContent = balLabel(this.s.balanceDb);

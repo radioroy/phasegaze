@@ -89,6 +89,10 @@ typedef struct {
     /* Spur mask trip point in visits of this worker's busiest LO; a real
      * emitter's bin fires at most once per visit. 0 = SPUR_PER_VISIT. */
     float spur_margin;
+    /* Cross-hop normalization exponent on (vmax_hop / vmax_sweep):
+     * 0 normalizes each hop to its own peak vmax_hop; 1 normalizes to the
+     * full-sweep peak vmax; > 1 suppresses weaker hops further. */
+    float sweep_norm;
 } hop_gates_t;
 
 typedef struct {
