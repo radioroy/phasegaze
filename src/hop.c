@@ -393,21 +393,15 @@ void hop_run(hop_ctx_t *h, const int8_t *blk, double lo, float vmax, int topk,
         pts[npts].intensity = vk;
         npts++;
     }
-    const float sweep_norm = gates ? gates->sweep_norm : 1.0f;
-    if (sweep_norm == 1.0f) {
-        for (uint32_t p = 0; p < npts; ++p) {
-            float inten = pts[p].intensity / vmax;
-            if (inten > 1.0f) inten = 1.0f;
-            if (inten < 0.0f) inten = 0.0f;
-            pts[p].intensity = inten;
-        }
-    } else if (npts > 0) {
+    if (npts > 0) {
         /* Scale by (vmax_hop / vmax_sw)^sweep_norm / vmax_hop so 0 normalizes
          * each 20 MHz slice to its local peak and >0 attenuates hops weaker
          * than the sweep peak before the shader's uGain power law. */
+        const float sweep_norm = gates ? gates->sweep_norm : 1.0f;
         float vmax_sw = vmax > vmax_hop ? vmax : vmax_hop;
-        float scale_hop = (sweep_norm <= 0.0f ? 1.0f
-                           : powf(vmax_hop / vmax_sw, sweep_norm)) / vmax_hop;
+        float scale_hop = sweep_norm <= 0.0f ? (1.0f / vmax_hop)
+                        : sweep_norm >= 1.0f ? (1.0f / vmax)
+                        : exp2f(sweep_norm * log2f(vmax_hop / vmax_sw)) / vmax_hop;
         for (uint32_t p = 0; p < npts; ++p) {
             float inten = pts[p].intensity * scale_hop;
             if (inten > 1.0f) inten = 1.0f;

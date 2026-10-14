@@ -754,8 +754,15 @@ static int vco_learn(csi_dev_t *d, double mhz, int from_current, uint8_t seed)
             return -1;
         if (adc >= 1 && adc <= 6)
             break;
+        /* Sub-band rail (0 at the bottom, 63 at the top): VAS cannot step
+         * further, so hold the end-stop band without spinning all 6 polls. */
+        if ((band == 0 && adc == 0 && mhz < 4700.0) ||
+            (band == 63 && adc == 7 && mhz > 6400.0))
+            break;
     }
-    if (adc < 1 || adc > 6)
+    int rail = (band == 0 && adc == 0 && mhz < 4700.0) ||
+               (band == 63 && adc == 7 && mhz > 6400.0);
+    if ((adc < 1 || adc > 6) && !rail)
         return -1;
 
     if (jtag_write(d, MAX2851_SPI, (uint16_t)((19u << 10) | (band & 0x3Fu))) != 0)
@@ -822,9 +829,17 @@ int csi_dev_set_lo(csi_dev_t *d, double freq_mhz)
     if (!vco_lookup(key, &band)) {
         if (vco_learn_one(d, freq_mhz, 1) != 0) {
             fprintf(stderr, "phasegaze: VCO learn failed at %.1f MHz\n", freq_mhz);
-            if (program_auto(d, freq_mhz, 1, 0) != 0)
+            uint8_t adc = 0;
+            if (read_vco(d, &band, &adc) != 0)
+                band = VAS_DEFAULT_SEED;
+            if (program_manual(d, band, w15, w16, w17, w2, 1) != 0)
                 return -1;
+            vco_store(key, band);
             d->last_lo_mhz = freq_mhz;
+            d->last_lna_word = w2;
+            d->have_lna_word = 1;
+        } else {
+            seed_save();
         }
         if (d->last_gain >= 0)
             csi_dev_set_gain(d, d->last_gain);
