@@ -384,13 +384,15 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
     border: 1px solid var(--line); border-radius: 2px; }
 
 #wifi-bar-center { display: flex; align-items: center; gap: 12px; font-size: 10px; color: var(--dim); letter-spacing: 0.08em; }
-.wifi-kpi { display: inline-flex; align-items: center; gap: 4px; }
+.wifi-kpi { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .wifi-kpi b { color: var(--txt); font-weight: 600; }
 
 #wifi-bar-right { display: flex; align-items: center; gap: 6px; }
 #wifi-bar-right button { background: var(--bg); color: var(--txt); border: 1px solid var(--line-hi);
     font: inherit; font-size: 10px; letter-spacing: 0.12em; padding: 3px 8px; cursor: pointer; text-shadow: 0 1px 2px #000; }
 #wifi-bar-right button:hover { border-color: var(--acc); color: var(--acc); }
+#wifi-bar-right button#wifi-hold { min-width: 52px; }
+#wifi-bar-right button#wifi-hold.on { border-color: var(--acc); color: var(--bg); background: var(--acc); text-shadow: none; }
 
 #wifi-body { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--bg); }
 
@@ -405,6 +407,8 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
 #wifi-packet-table tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
 #wifi-packet-table tbody tr.selected { background: rgba(255, 255, 255, 0.07); outline: 1px solid var(--acc); }
 #wifi-packet-table td { padding: 3px 6px; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; color: var(--txt); }
+#wifi-packet-table td.ssid { max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+#wifi-packet-table td.ssid.hidden { color: var(--dim); }
 
 .badge-fcs-ok { color: var(--acc); font-weight: 600; }
 .badge-fcs-bad { color: var(--dim); }
@@ -475,6 +479,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
             <span class="wifi-kpi" id="wifi-kpi-evm">EVM: <b>--</b> dB</span>
         </div>
         <div id="wifi-bar-right">
+            <button type="button" id="wifi-hold" title="Freeze the packet table to inspect rows (scrolling up or clicking a row also holds)">HOLD</button>
             <button type="button" id="wifi-clear" title="Clear packet log">CLEAR</button>
             <button type="button" id="wifi-close" title="Close Wi-Fi demodulator">CLOSE</button>
         </div>
@@ -487,6 +492,7 @@ body.cam.dim #fps, body.cam.dim #status, body.cam.dim #cal-tip {
                         <th style="width:45px">#</th>
                         <th style="width:65px">TIME</th>
                         <th style="width:105px">TYPE</th>
+                        <th style="width:140px">SSID</th>
                         <th style="width:125px">BSSID</th>
                         <th style="width:125px">SOURCE</th>
                         <th style="width:125px">DEST</th>

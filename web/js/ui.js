@@ -3688,9 +3688,29 @@ export class Ui {
                 if (!tr) return;
                 const idx = parseInt(tr.dataset.idx, 10);
                 if (!Number.isNaN(idx)) {
-                    this._selectWifiPacket(idx);
+                    this._setWifiHold(true);
+                    this._selectWifiPacket(idx, tr);
                 }
             });
+        }
+        const holdBtn = $('wifi-hold');
+        if (holdBtn) {
+            holdBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._setWifiHold(!this._wifiHoldOn);
+            };
+        }
+        const tableBox = $('wifi-table-container');
+        if (tableBox) {
+            const mark = () => { this._wifiInputT = performance.now(); };
+            for (const ev of ['wheel', 'touchmove', 'keydown']) {
+                tableBox.addEventListener(ev, mark, { passive: true });
+            }
+            // Scrollbar drags can run for seconds, so track the button itself.
+            tableBox.addEventListener('pointerdown', () => { this._wifiPtrDown = true; }, { passive: true });
+            window.addEventListener('pointerup', () => { this._wifiPtrDown = false; mark(); }, { passive: true });
+            window.addEventListener('pointercancel', () => { this._wifiPtrDown = false; }, { passive: true });
+            tableBox.addEventListener('scroll', () => this._onWifiScroll(), { passive: true });
         }
 
         this._wifiClosed = false;
@@ -3760,6 +3780,7 @@ export class Ui {
     }
 
     _stopWifi() {
+        this._setWifiHold(false);
         this._wifiClosed = true;
         this._wifiMhzTuned = null;
         this._wifiChTuned = null;
@@ -3822,6 +3843,9 @@ export class Ui {
         this._wifiLastSelectedIdx = -1;
         this._wifiPending = [];
         this._wifiRateHist = [];
+        this._wifiHoldOn = false;
+        this._wifiHeld = [];
+        this._updateWifiHoldBtn();
         const countEl = $('wifi-kpi-count');
         if (countEl) countEl.innerHTML = '<b>0</b> PKTS';
         const snrEl = $('wifi-kpi-snr');
@@ -3890,16 +3914,28 @@ export class Ui {
             if (evmEl) evmEl.innerHTML = `EVM: <b>${last.evm_db.toFixed(1)}</b> dB`;
         }
 
+        // While held the table is left alone so rows stay put under the
+        // cursor; the newest 200 wait in _wifiHeld for resume.
+        if (this._wifiHoldOn) {
+            const held = this._wifiHeld;
+            for (const p of batch) held.push(p);
+            if (held.length > 400) held.splice(0, held.length - 200);
+            this._updateWifiHoldBtn();
+            return;
+        }
+        this._appendWifiRows(batch);
+    }
+
+    _appendWifiRows(batch) {
         const tbody = $('wifi-packet-tbody');
         if (!tbody) return;
         const container = $('wifi-table-container');
-        const atBottom = !container ||
-            container.scrollHeight - container.scrollTop - container.clientHeight < 70;
 
         const frag = document.createDocumentFragment();
         for (const pkt of batch.slice(-200)) {
             const tr = document.createElement('tr');
             tr.dataset.idx = String(pkt._n);
+            tr._pkt = pkt;
 
             const t = pkt._t;
             const timeStr = t.toTimeString().split(' ')[0] + '.' + String(t.getMilliseconds()).padStart(3, '0');
@@ -3909,6 +3945,8 @@ export class Ui {
                 cleanSubtype = cleanSubtype.substring(pkt.pkt_type.length).replace(/^[:\s\-]+/, '');
             }
             const typeStr = (pkt.pkt_type ? `${pkt.pkt_type}` : '') + (cleanSubtype ? `: ${cleanSubtype}` : '');
+            const ssidHidden = !pkt.ssid && pkt.subtype === 'Beacon';
+            const ssidStr = escHtml(pkt.ssid || (ssidHidden ? '<hidden>' : ''));
             const bssidStr = escHtml(pkt.bssid || '');
             const srcStr = escHtml(pkt.sa || (pkt.is_ipv4 ? pkt.ip_src : ''));
             const dstStr = escHtml(pkt.da || (pkt.is_ipv4 ? pkt.ip_dst : ''));
@@ -3923,6 +3961,7 @@ export class Ui {
                 <td>${pkt._n}</td>
                 <td>${timeStr}</td>
                 <td><span class="${typeClass}">${escHtml(typeStr)}</span></td>
+                <td class="ssid${ssidHidden ? ' hidden' : ''}" title="${ssidStr}">${ssidStr}</td>
                 <td title="${bssidStr}">${bssidStr}</td>
                 <td title="${srcStr}">${srcStr}</td>
                 <td title="${dstStr}">${dstStr}</td>
@@ -3939,21 +3978,62 @@ export class Ui {
             tbody.removeChild(tbody.firstChild);
         }
 
-        if (container && (atBottom || this._wifiPktCount <= 5)) {
-            container.scrollTop = container.scrollHeight;
+        if (container) container.scrollTop = container.scrollHeight;
+    }
+
+    _updateWifiHoldBtn() {
+        const btn = $('wifi-hold');
+        if (!btn) return;
+        btn.classList.toggle('on', !!this._wifiHoldOn);
+        if (!this._wifiHoldOn) {
+            btn.textContent = 'HOLD';
+            btn.title = 'Freeze the packet table to inspect rows (scrolling up or clicking a row also holds)';
+        } else {
+            const n = this._wifiPktCount - this._wifiHoldAt;
+            btn.textContent = n > 0 ? `LIVE +${n}` : 'LIVE';
+            btn.title = 'Resume the live packet table (or scroll to the bottom)';
         }
     }
 
-    _selectWifiPacket(idx) {
+    _setWifiHold(on) {
+        on = !!on;
+        if (on === !!this._wifiHoldOn) return;
+        this._wifiHoldOn = on;
+        if (on) {
+            this._wifiHoldAt = this._wifiPktCount;
+            this._wifiHeld = [];
+        } else {
+            const held = this._wifiHeld || [];
+            this._wifiHeld = [];
+            if (held.length) this._appendWifiRows(held);
+            else {
+                const container = $('wifi-table-container');
+                if (container) container.scrollTop = container.scrollHeight;
+            }
+        }
+        this._updateWifiHoldBtn();
+    }
+
+    // Scrolling away from the bottom holds; scrolling back resumes. Only
+    // scrolls that follow real input count: our own scrollTop writes, row
+    // trimming and window resizes all fire 'scroll' too.
+    _onWifiScroll() {
+        const c = $('wifi-table-container');
+        if (!c) return;
+        if (!this._wifiPtrDown && performance.now() - (this._wifiInputT || 0) > 400) return;
+        const atBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 8;
+        this._setWifiHold(!atBottom);
+    }
+
+    _selectWifiPacket(idx, row) {
         const tbody = $('wifi-packet-tbody');
         if (tbody) {
-            tbody.querySelectorAll('tr').forEach(tr => {
-                tr.classList.toggle('selected', tr.dataset.idx === String(idx));
-            });
+            tbody.querySelectorAll('tr.selected').forEach(tr => tr.classList.remove('selected'));
+            if (row) row.classList.add('selected');
         }
         const pkts = this._wifiPkts;
         const base = pkts.length ? pkts[0]._n : 0;
-        const pkt = pkts[idx - base] || pkts[pkts.length - 1];
+        const pkt = (row && row._pkt) || pkts[idx - base] || pkts[pkts.length - 1];
         if (!pkt) return;
         this._wifiLastSelectedIdx = idx;
 
