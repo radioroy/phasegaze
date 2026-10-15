@@ -1,3 +1,11 @@
+quadrf-phasegaze (0.1.7-1) unstable; urgency=medium
+
+  * web: Add Wi-Fi SSID column and table hold for inspection
+  * web: Batch Wi-Fi table updates per frame and escape decoded fields
+  * dsp: Replace Wi-Fi burst decoder with streaming 802.11a/g receiver
+
+ -- Roy C. Gross <61633595+radioroy@users.noreply.github.com>  Wed, 14 Oct 2026 18:29:39 -0700
+
 quadrf-phasegaze (0.1.6-1) unstable; urgency=medium
 
   * web: Add anti-aliased waterfall display with full-screen height range
