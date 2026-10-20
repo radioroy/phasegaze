@@ -75,7 +75,7 @@ export class Cam {
             title = 'HTTPS REQUIRED';
             msg = 'This page is on HTTP, so the camera feed is not ' +
                   'available. Install the QuadRF certificate from the ' +
-                  'setup page, then reopen PhaseGaze over HTTPS.';
+                  'setup page, then reopen RF Vision over HTTPS.';
         } else if (name === 'NotAllowedError' || name === 'SecurityError') {
             title = 'CAMERA DENIED';
             msg = `Allow camera for ${location.host} in this browser's site ` +

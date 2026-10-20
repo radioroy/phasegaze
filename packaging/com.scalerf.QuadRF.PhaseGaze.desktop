@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=PhaseGaze
+Name=RF Vision (Advanced)
 Comment=Swept-LO phase-gradient hemisphere over four-lane CSI
 Exec=/usr/bin/quadrf-phasegaze-launch
 TryExec=/usr/bin/quadrf-phasegaze

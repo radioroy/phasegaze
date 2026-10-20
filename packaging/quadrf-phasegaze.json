@@ -2,7 +2,7 @@
   "apps": [
     {
       "id": "phasegaze",
-      "name": "PhaseGaze",
+      "name": "RF Vision (Advanced)",
       "desktop_entry": "com.scalerf.QuadRF.PhaseGaze.desktop",
       "service": "quadrf-phasegaze.service",
       "binaries": ["quadrf-phasegaze"],

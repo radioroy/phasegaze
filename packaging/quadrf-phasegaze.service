@@ -1,5 +1,5 @@
 [Unit]
-Description=QuadRF PhaseGaze
+Description=QuadRF RF Vision (Advanced)
 Wants=load-quadrf.service
 After=load-quadrf.service
 

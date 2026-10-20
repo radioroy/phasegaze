@@ -19,8 +19,8 @@ Depends:
  ${shlibs:Depends}
 Recommends:
  quadrf-fpga (>= 1.0.0)
-Description: swept-LO phase-gradient hemisphere viewer for QuadRF
- PhaseGaze captures multi-lane CSI from the QuadRF front end, computes
+Description: RF Vision (Advanced) swept-LO phase-gradient hemisphere viewer for QuadRF
+ RF Vision (Advanced) captures multi-lane CSI from the QuadRF front end, computes
  spatial phase gradients across swept local oscillators, and serves a live 3D
  hemisphere view over WebSockets.
  .

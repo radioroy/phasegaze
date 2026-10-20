@@ -3,10 +3,10 @@
   <id>com.scalerf.QuadRF.PhaseGaze</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
-  <name>PhaseGaze</name>
+  <name>RF Vision (Advanced)</name>
   <summary>Swept-LO phase-gradient hemisphere over four-lane CSI</summary>
   <description>
-    <p>PhaseGaze sweeps the QuadRF local oscillator, extracts phase gradients across the four CSI channels, and streams the result to a browser hemisphere view.</p>
+    <p>RF Vision (Advanced) sweeps the QuadRF local oscillator, extracts phase gradients across the four CSI channels, and streams the result to a browser hemisphere view.</p>
   </description>
   <launchable type="desktop-id">com.scalerf.QuadRF.PhaseGaze.desktop</launchable>
   <provides>

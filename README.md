@@ -1,4 +1,4 @@
-# PhaseGaze
+# RF Vision (Advanced) (PhaseGaze)
 
 Swept-LO phase-gradient hemisphere viewer for QuadRF.
 
