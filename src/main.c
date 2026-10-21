@@ -720,6 +720,15 @@ static void lock_cal_start(void)
 #define N_ACC              4
 #define FFTW_WISDOM_FILE   "phasegaze-fftw.wisdom"
 
+/* Precomputed 8192-pt out-of-place forward DFT wisdom for Cortex-A76 NEON
+ * (t2fv_64_neon + n1fv_128_neon). Without this seed, a cold FFTW_MEASURE on
+ * fresh installs blocks startup for ~21.4 s before :8001 binds. */
+static const char k_default_wisdom[] =
+    "(fftw-3.3.10 fftwf_wisdom #x4a633eef #xb5a95564 #x91014bdd #x9c85ce5f\n"
+    "  (fftwf_codelet_t2fv_64_neon 0 #x11bdd #x11bdd #x0 #x5219d1e1 #x69c33053 #xadfc9ddd #x0e6ae147)\n"
+    "  (fftwf_codelet_n1fv_128_neon 0 #x11bdd #x11bdd #x0 #x90d518d6 #x140a8918 #xc6b1bb5b #x0f240621)\n"
+    ")\n";
+
 typedef struct {
     int      used, closed;
     uint32_t sweep;
@@ -1440,8 +1449,9 @@ int main(int argc, char **argv)
         }
     }
     static wctx_t wk[N_WORKERS];
-    /* Relative to WorkingDirectory; a cold MEASURE costs about a second. */
     int have_wisdom = fftwf_import_wisdom_from_filename(FFTW_WISDOM_FILE);
+    if (!have_wisdom)
+        fftwf_import_wisdom_from_string(k_default_wisdom);
     for (int i = 0; i < N_WORKERS; ++i) {
         if (wctx_init(&wk[i]) != 0) {
             fprintf(stderr, "worker alloc failed\n");

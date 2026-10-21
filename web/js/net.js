@@ -17,6 +17,7 @@ export class Net {
         this.onStatus = null;
         this._timer = null;
         this._closed = false;
+        this._everLive = false;
     }
 
     connect() {
@@ -31,15 +32,16 @@ export class Net {
         this.ws = ws;
 
         ws.onopen = () => {
+            this._everLive = true;
             if (this.onStatus) this.onStatus('live');
             this.send({ type: 'get_state' });
         };
         ws.onclose = () => {
             this.ws = null;
             if (this._closed) return;
-            if (this.onStatus) this.onStatus('lost');
+            if (this.onStatus) this.onStatus(this._everLive ? 'lost' : 'connecting');
             clearTimeout(this._timer);
-            this._timer = setTimeout(() => this.connect(), 1000);
+            this._timer = setTimeout(() => this.connect(), this._everLive ? 1000 : 250);
         };
         ws.onerror = () => { try { ws.close(); } catch (_) {} };
         ws.onmessage = (ev) => {
